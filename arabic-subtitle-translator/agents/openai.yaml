@@ -1,6 +1,0 @@
-interface:
-  display_name: "Arabic Subtitle Translator"
-  short_description: "Translate subtitle files to natural Arabic without exposing timestamps."
-  default_prompt: "Use $arabic-subtitle-translator to translate this file to SRT format."
-policy:
-  allow_implicit_invocation: true

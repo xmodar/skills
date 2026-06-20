@@ -223,6 +223,51 @@ def compact_record(record: CueRecord) -> str:
     )
 
 
+def compact_text_record(record: CueRecord) -> str:
+    return f"{record.cue_id}: {json.dumps(record.text, ensure_ascii=False)}"
+
+
+def write_compact_text(path: Path, records: Iterable[CueRecord]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, delete=False, newline="\n"
+    ) as handle:
+        for record in records:
+            handle.write(compact_text_record(record))
+            handle.write("\n")
+        temp_name = handle.name
+    os.replace(temp_name, path)
+
+
+def parse_compact_text(path: Path) -> list[CueRecord]:
+    records: list[CueRecord] = []
+    seen: set[int] = set()
+    line_re = re.compile(r"^\s*(\d+)\s*:\s*(.+?)\s*$")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                match = line_re.match(line)
+                if not match:
+                    fail("invalid_compact_text", "A compact translation line must use ID: JSON-string format.")
+                cue_id = int(match.group(1))
+                if cue_id in seen:
+                    fail("invalid_compact_text", "A compact translation file contains a duplicate cue ID.")
+                try:
+                    text = json.loads(match.group(2))
+                except json.JSONDecodeError:
+                    fail("invalid_compact_text", "A compact translation line has an invalid JSON string.")
+                if not isinstance(text, str):
+                    fail("invalid_compact_text", "A compact translation value must be a string.")
+                records.append(CueRecord(cue_id, text))
+                seen.add(cue_id)
+    except OSError:
+        fail("missing_intermediate", "A required compact translation file is missing.")
+    return records
+
+
 def write_records(path: Path, records: Iterable[CueRecord]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -275,6 +320,78 @@ def split_chunks(records: list[CueRecord], max_cues: int, max_chars: int) -> lis
     if current:
         chunks.append(current)
     return chunks
+
+
+def all_source_records(workdir: Path, manifest: dict[str, Any]) -> list[CueRecord]:
+    records: list[CueRecord] = []
+    for item in manifest["chunks"]:
+        records.extend(read_records(workdir / "chunks" / "source" / item["name"]))
+    return records
+
+
+def parse_ranges(value: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for raw_part in re.split(r"[,\n]+", value):
+        part = raw_part.strip()
+        if not part or part.startswith("#"):
+            continue
+        match = re.match(r"^(\d+)\s*-\s*(\d+)(?:\s+.*)?$", part)
+        if not match:
+            fail("invalid_ranges", "Cue ranges must use START-END entries.")
+        start = int(match.group(1))
+        end = int(match.group(2))
+        if end < start:
+            fail("invalid_ranges", "A cue range ends before it starts.")
+        ranges.append((start, end))
+    if not ranges:
+        fail("invalid_ranges", "No cue ranges were provided.")
+    return ranges
+
+
+def semantic_chunks_from_ranges(records: list[CueRecord], ranges: list[tuple[int, int]]) -> list[list[CueRecord]]:
+    by_id = {record.cue_id: record for record in records}
+    expected_next = records[0].cue_id if records else 1
+    chunks: list[list[CueRecord]] = []
+    for start, end in ranges:
+        if start != expected_next:
+            fail("invalid_ranges", "Cue ranges must be complete, ordered, and non-overlapping.")
+        chunk: list[CueRecord] = []
+        for cue_id in range(start, end + 1):
+            record = by_id.get(cue_id)
+            if record is None:
+                fail("invalid_ranges", "A cue range references a missing cue ID.")
+            chunk.append(record)
+        chunks.append(chunk)
+        expected_next = end + 1
+    if records and expected_next != records[-1].cue_id + 1:
+        fail("invalid_ranges", "Cue ranges do not cover every cue ID.")
+    return chunks
+
+
+def replace_manifest_chunks(workdir: Path, manifest: dict[str, Any], chunks: list[list[CueRecord]]) -> None:
+    source_dir = workdir / "chunks" / "source"
+    translated_dir = workdir / "chunks" / "translated"
+    shutil.rmtree(source_dir, ignore_errors=True)
+    shutil.rmtree(translated_dir, ignore_errors=True)
+    source_dir.mkdir(parents=True, exist_ok=True)
+    translated_dir.mkdir(parents=True, exist_ok=True)
+
+    chunk_metadata: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks, 1):
+        name = f"{index:04d}.jsonl"
+        write_records(source_dir / name, chunk)
+        chunk_metadata.append(
+            {
+                "name": name,
+                "first_id": chunk[0].cue_id,
+                "last_id": chunk[-1].cue_id,
+                "cue_count": len(chunk),
+            }
+        )
+    manifest["chunks"] = chunk_metadata
+    manifest["chunk_count"] = len(chunks)
+    manifest["chunking"] = "semantic_ranges"
+    atomic_json_write(manifest_path(workdir), manifest)
 
 
 def manifest_path(workdir: Path) -> Path:
@@ -527,6 +644,113 @@ def cmd_check(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_rechunk(args: argparse.Namespace) -> None:
+    workdir = Path(args.workdir).expanduser().resolve()
+    manifest = load_manifest(workdir)
+    ensure_source_unchanged(manifest)
+    translated_dir = workdir / "chunks" / "translated"
+    if any(translated_dir.glob("*.jsonl")) and not args.force:
+        fail("translated_chunks_exist", "Refusing to rechunk after translation started; pass --force to discard translated chunks.")
+    range_text = args.ranges
+    if args.ranges_file:
+        try:
+            range_text = Path(args.ranges_file).expanduser().read_text(encoding="utf-8")
+        except OSError:
+            fail("missing_ranges", "The requested cue ranges file cannot be read.")
+    if not range_text:
+        fail("invalid_ranges", "Cue ranges must be provided.")
+    records = all_source_records(workdir, manifest)
+    chunks = semantic_chunks_from_ranges(records, parse_ranges(range_text))
+    replace_manifest_chunks(workdir, manifest, chunks)
+    emit(
+        {
+            "ok": True,
+            "action": "rechunk",
+            "workdir": str(workdir),
+            "chunks": len(chunks),
+            "cues": len(records),
+            "timestamps_exposed": False,
+        }
+    )
+
+
+def cmd_export_compact(args: argparse.Namespace) -> None:
+    workdir = Path(args.workdir).expanduser().resolve()
+    manifest = load_manifest(workdir)
+    ensure_source_unchanged(manifest)
+    name = selected_chunks(manifest, args.chunk)[0]
+    chunk_item = next(item for item in manifest["chunks"] if item["name"] == name)
+    source_records = all_source_records(workdir, manifest)
+    by_id = {record.cue_id: record for record in source_records}
+    context = max(0, int(args.context_cues))
+    before_start = max(1, int(chunk_item["first_id"]) - context)
+    after_end = min(int(manifest["cue_count"]), int(chunk_item["last_id"]) + context)
+
+    sections: list[tuple[str, list[CueRecord]]] = []
+    if context:
+        before = [by_id[cue_id] for cue_id in range(before_start, int(chunk_item["first_id"]))]
+        if before:
+            sections.append(("context_before", before))
+    target = [by_id[cue_id] for cue_id in range(int(chunk_item["first_id"]), int(chunk_item["last_id"]) + 1)]
+    sections.append(("translate", target))
+    if context:
+        after = [by_id[cue_id] for cue_id in range(int(chunk_item["last_id"]) + 1, after_end + 1)]
+        if after:
+            sections.append(("context_after", after))
+
+    output = Path(args.output).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=output.parent, delete=False, newline="\n"
+    ) as handle:
+        for section_name, records in sections:
+            handle.write(f"# {section_name}\n")
+            for record in records:
+                handle.write(compact_text_record(record))
+                handle.write("\n")
+        temp_name = handle.name
+    os.replace(temp_name, output)
+    emit(
+        {
+            "ok": True,
+            "action": "export-compact",
+            "chunk": name,
+            "output": str(output),
+            "target_cues": int(chunk_item["cue_count"]),
+            "context_cues": context,
+            "timestamps_exposed": False,
+        }
+    )
+
+
+def cmd_import_compact(args: argparse.Namespace) -> None:
+    workdir = Path(args.workdir).expanduser().resolve()
+    manifest = load_manifest(workdir)
+    ensure_source_unchanged(manifest)
+    name = selected_chunks(manifest, args.chunk)[0]
+    source_path = workdir / "chunks" / "source" / name
+    translated_path = workdir / "chunks" / "translated" / name
+    source_records = read_records(source_path)
+    translated_records = parse_compact_text(Path(args.input).expanduser().resolve())
+    expected_ids = [record.cue_id for record in source_records]
+    found_ids = [record.cue_id for record in translated_records]
+    if found_ids != expected_ids:
+        fail("id_sequence_mismatch", "The compact translation IDs do not exactly match the target chunk.")
+    write_records(translated_path, translated_records)
+    result = validate_chunk(source_path, translated_path)
+    emit(
+        {
+            "ok": True,
+            "action": "import-compact",
+            "chunk": name,
+            "cues": result["cues"],
+            "warning_ids": result["warning_ids"],
+            "warnings": result["warnings"],
+            "timestamps_exposed": False,
+        }
+    )
+
+
 def cmd_state(args: argparse.Namespace) -> None:
     workdir = Path(args.workdir).expanduser().resolve()
     load_manifest(workdir)
@@ -736,6 +960,30 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("workdir")
     check.add_argument("--chunk")
     check.set_defaults(func=cmd_check)
+
+    rechunk = subparsers.add_parser("rechunk", help="Replace fixed chunks with model-chosen semantic cue ranges.")
+    rechunk.add_argument("workdir")
+    rechunk.add_argument("--ranges")
+    rechunk.add_argument("--ranges-file")
+    rechunk.add_argument("--force", action="store_true")
+    rechunk.set_defaults(func=cmd_rechunk)
+
+    export_compact = subparsers.add_parser(
+        "export-compact", help="Write a timestamp-free compact text view for one chunk."
+    )
+    export_compact.add_argument("workdir")
+    export_compact.add_argument("--chunk", required=True)
+    export_compact.add_argument("--context-cues", type=int, default=0)
+    export_compact.add_argument("--output", required=True)
+    export_compact.set_defaults(func=cmd_export_compact)
+
+    import_compact = subparsers.add_parser(
+        "import-compact", help="Convert a compact translated chunk into validated JSONL."
+    )
+    import_compact.add_argument("workdir")
+    import_compact.add_argument("--chunk", required=True)
+    import_compact.add_argument("--input", required=True)
+    import_compact.set_defaults(func=cmd_import_compact)
 
     state = subparsers.add_parser("state", help="Persist resumable workflow state.")
     state.add_argument("workdir")
