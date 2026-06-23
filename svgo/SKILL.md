@@ -1,6 +1,6 @@
 ---
 name: svgo
-description: Edit, transform, optimize, reverse, and serialize SVG path data using Yqnn/svg-path-editor's svg-path-editor-lib and optimize whole SVG documents with SVGO. Use when Codex needs to modify SVG path d attributes, raw SVG path strings, icon paths, path coordinates, command relative/absolute form, subpath order, path origin, SVG cleanup, SVGO plugin presets, SVG minification, or SVG file optimization from a local CLI workflow.
+description: Edit, transform, optimize, reverse, and serialize SVG path data using Yqnn/svg-path-editor's svg-path-editor-lib and optimize whole SVG documents with SVGO. Use when Codex needs to modify SVG path d attributes, raw SVG path strings, icon paths, path coordinates, raw SVG matrix transforms, command relative/absolute form, subpath order, path origin, SVG cleanup, SVGO plugin presets, SVG minification, or SVG file optimization from a local CLI workflow.
 ---
 
 # SVGO
@@ -22,6 +22,7 @@ npm install --prefix <skill-dir>/scripts
 ```bash
 node <skill-dir>/scripts/svg-path-cli.mjs --path "M 0 0 L 10 0 L 10 10 L 0 10 Z" --op "optimize:safe" --minify
 node <skill-dir>/scripts/svg-path-cli.mjs --input icon.svg --output icon.optimized.svg --op "translate:2,-1" --op "optimize:size" --minify
+node <skill-dir>/scripts/svg-path-cli.mjs --path "M10 10h5v5z" --op "matrix(-1,0,0,1,30,0)" --minify
 node <skill-dir>/scripts/svg-path-cli.mjs --input icon.svg --output icon.svgo.svg --svgo --svgo-multipass --svgo-precision 3
 ```
 
@@ -45,6 +46,7 @@ The CLI supports these ordered `--op` values:
 
 - `translate:dx,dy`
 - `scale:kx,ky`
+- `matrix:a,b,c,d,e,f` or `matrix(a,b,c,d,e,f)` for a raw SVG affine matrix
 - `rotate:ox,oy,degrees`
 - `relative`
 - `absolute`
@@ -53,6 +55,8 @@ The CLI supports these ordered `--op` values:
 - `optimize:safe`, `optimize:size`, `optimize:closed`, `optimize:all`, or `optimize:<comma-separated upstream flags>`
 
 Prefer `optimize:safe` for normal icon cleanup. Use `optimize:size` when smaller output is more important and path direction can change. Use `optimize:closed` or `optimize:all` only when closing paths or removing orphan dots will not change stroked rendering.
+
+The `matrix` operation accepts comma or whitespace separators and maps points using the SVG convention `x' = a*x + c*y + e`, `y' = b*x + d*y + f`. Use it to bake group or path transforms into raw path data; it can handle reflected, rotated, skewed, and arc paths.
 
 ## SVGO Operations
 

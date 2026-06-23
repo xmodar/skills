@@ -40,3 +40,4 @@ const d = svg.asString(decimals, minify);
 - Operations mutate the `SvgPath` instance in place.
 - `path.path` is the array of command items; item indexes used by `reversePath` and `changePathOrigin` refer to this array.
 - `asString(decimals = 4, minify = false)` serializes the final path.
+- The upstream library has no raw affine `matrix(a,b,c,d,e,f)` API. The CLI implements its `matrix` operation by asking SVGO to bake a temporary path `transform` into `d`, then reparsing the result with `SvgPath` so later ordered operations still compose.

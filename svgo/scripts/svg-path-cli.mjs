@@ -11,6 +11,7 @@ const usage = `Usage:
 Path operations are applied in order:
   translate:dx,dy
   scale:kx,ky
+  matrix:a,b,c,d,e,f or matrix(a,b,c,d,e,f)
   rotate:ox,oy,degrees
   relative
   absolute
@@ -180,6 +181,22 @@ function parseNumberList(value, expected, label) {
   return parts.map((part, index) => parseNumber(part, `${label}[${index}]`));
 }
 
+function parseMatrixValues(value, label) {
+  const parts = value.trim().split(/[,\s]+/).filter(Boolean);
+  if (parts.length !== 6) {
+    fail(`${label} requires 6 comma- or space-separated numbers`);
+  }
+  return parts.map((part, index) => parseNumber(part, `${label}[${index}]`));
+}
+
+function splitOperation(op) {
+  const matrixCall = op.match(/^matrix\((.*)\)$/s);
+  if (matrixCall) {
+    return ['matrix', matrixCall[1]];
+  }
+  return op.split(/:(.*)/s);
+}
+
 function optimizeOptions(profile) {
   if (!profile || profile === 'safe') {
     return {
@@ -228,8 +245,8 @@ function optimizeOptions(profile) {
   return options;
 }
 
-function applyOperation(svg, op) {
-  const [name, rest = ''] = op.split(/:(.*)/s);
+async function applyOperation(svg, op, args) {
+  const [name, rest = ''] = splitOperation(op);
   switch (name) {
     case 'translate': {
       const [dx, dy] = parseNumberList(rest, 2, op);
@@ -240,6 +257,10 @@ function applyOperation(svg, op) {
       const [kx, ky] = parseNumberList(rest, 2, op);
       svg.scale(kx, ky);
       break;
+    }
+    case 'matrix': {
+      const matrix = parseMatrixValues(rest, op);
+      return new SvgPath(transformPathDataWithMatrix(svg.asString(matrixFloatPrecision(args), false), matrix, args));
     }
     case 'rotate': {
       const [ox, oy, degrees] = parseNumberList(rest, 3, op);
@@ -267,12 +288,13 @@ function applyOperation(svg, op) {
     default:
       fail(`Unknown operation: ${name}`);
   }
+  return svg;
 }
 
-function applyPathOperations(pathData, args) {
-  const svg = new SvgPath(pathData);
+async function applyPathOperations(pathData, args) {
+  let svg = new SvgPath(pathData);
   for (const op of args.ops) {
-    applyOperation(svg, op);
+    svg = await applyOperation(svg, op, args);
   }
   return svg.asString(args.decimals, args.minify);
 }
@@ -282,7 +304,7 @@ async function editPathData(pathData, args) {
   if (shouldRunSvgo(args) && args.svgoOrder === 'before') {
     result = await optimizePathDataWithSvgo(result, args);
   }
-  result = applyPathOperations(result, args);
+  result = await applyPathOperations(result, args);
   if (shouldRunSvgo(args) && args.svgoOrder === 'after') {
     result = await optimizePathDataWithSvgo(result, args);
   }
@@ -421,9 +443,34 @@ async function optimizeSvgText(text, args, sourcePath) {
 async function optimizePathDataWithSvgo(pathData, args) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg"><path d="${escapeAttribute(pathData)}"/></svg>`;
   const optimized = await optimizeSvgText(svg, args);
-  const match = optimized.match(/\bd\s*=\s*(["'])([\s\S]*?)\1/);
+  return extractPathData(optimized, 'SVGO removed or could not return a path d attribute from raw path input');
+}
+
+function transformPathDataWithMatrix(pathData, matrix, args) {
+  const transform = `matrix(${matrix.join(' ')})`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg"><path transform="${escapeAttribute(transform)}" d="${escapeAttribute(pathData)}"/></svg>`;
+  const optimized = optimizeSvg(svg, {
+    multipass: true,
+    floatPrecision: matrixFloatPrecision(args),
+    plugins: [{
+      name: 'preset-default',
+      params: { overrides: { cleanupIds: false, mergePaths: false } }
+    }]
+  }).data;
+  if (/\btransform\s*=/.test(optimized)) {
+    fail(`SVGO could not bake ${transform} into the path data`);
+  }
+  return extractPathData(optimized, `SVGO could not return a path d attribute after ${transform}`);
+}
+
+function matrixFloatPrecision(args) {
+  return Math.min(Math.max(args.decimals, 1), 15);
+}
+
+function extractPathData(svgText, errorMessage) {
+  const match = svgText.match(/\bd\s*=\s*(["'])([\s\S]*?)\1/);
   if (!match) {
-    fail('SVGO removed or could not return a path d attribute from raw path input');
+    fail(errorMessage);
   }
   return match[2];
 }
