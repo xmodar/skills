@@ -9,13 +9,15 @@ Use this skill for deterministic edits to SVG path `d` data and whole-file SVG o
 
 ## Quick Start
 
-1. Install the CLI dependency once when needed:
+1. Run the CLI directly first. Do not install dependencies as a preflight on every skill use.
+
+2. If the script fails with a missing module/dependency error because `scripts/node_modules` is absent, create it once, then retry the same command:
 
 ```bash
 npm install --prefix <skill-dir>/scripts
 ```
 
-2. Run the CLI with raw path data or an SVG file:
+3. Run the CLI with raw path data or an SVG file:
 
 ```bash
 node <skill-dir>/scripts/svg-path-cli.mjs --path "M 0 0 L 10 0 L 10 10 L 0 10 Z" --op "optimize:safe" --minify
@@ -28,13 +30,14 @@ Use `--help` for all CLI options and operation formats.
 ## Workflow
 
 1. Identify whether the user gave a raw path string or an SVG file.
-2. Preserve the original file unless the user explicitly asks for in-place replacement. Write edited SVGs to a new output path.
-3. Use path operations for coordinate edits, path reversal, origin changes, or selected path `d` attributes.
-4. Use SVGO for whole-document cleanup: metadata/comments, style minification, transforms, shape-to-path conversion, path-data conversion, ID cleanup, attribute sorting, and file minification.
-5. Apply path operations in the user-specified order with repeated `--op` flags.
-6. Run SVGO after path-index-specific edits unless the user asks for `--svgo-order before`; SVGO plugins such as `mergePaths` and `convertPathData` can change path command structure and indexes.
-7. Use `--decimals` and `--minify` for path serialization; use `--svgo-precision`, `--svgo-pretty`, and related flags for SVGO serialization.
-8. Render or inspect the result when visual fidelity matters.
+2. Run the script before installing dependencies. If the run fails because `scripts/node_modules` is missing, run `npm install --prefix <skill-dir>/scripts` once and retry. Do not run `npm install` on every skill use.
+3. Preserve the original file unless the user explicitly asks for in-place replacement. Write edited SVGs to a new output path.
+4. Use path operations for coordinate edits, path reversal, origin changes, or selected path `d` attributes.
+5. Use SVGO for whole-document cleanup: metadata/comments, style minification, transforms, shape-to-path conversion, path-data conversion, ID cleanup, attribute sorting, and file minification.
+6. Apply path operations in the user-specified order with repeated `--op` flags.
+7. Run SVGO after path-index-specific edits unless the user asks for `--svgo-order before`; SVGO plugins such as `mergePaths` and `convertPathData` can change path command structure and indexes.
+8. Use `--decimals` and `--minify` for path serialization; use `--svgo-precision`, `--svgo-pretty`, and related flags for SVGO serialization.
+9. Render or inspect the result when visual fidelity matters.
 
 ## Operations
 
