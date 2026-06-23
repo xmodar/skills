@@ -1,0 +1,4 @@
+interface:
+  display_name: "SVGO"
+  short_description: "Edit and optimize SVGs from the CLI"
+  default_prompt: "Use $svgo to edit this SVG path or optimize this SVG file."

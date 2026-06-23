@@ -1,9 +1,9 @@
 ---
-name: svg-path-editor
+name: svgo
 description: Edit, transform, optimize, reverse, and serialize SVG path data using Yqnn/svg-path-editor's svg-path-editor-lib and optimize whole SVG documents with SVGO. Use when Codex needs to modify SVG path d attributes, raw SVG path strings, icon paths, path coordinates, command relative/absolute form, subpath order, path origin, SVG cleanup, SVGO plugin presets, SVG minification, or SVG file optimization from a local CLI workflow.
 ---
 
-# SVG Path Editor
+# SVGO
 
 Use this skill for deterministic edits to SVG path `d` data and whole-file SVG optimization. Prefer the bundled CLI before hand-editing path strings or manually minifying SVG markup.
 
