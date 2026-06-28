@@ -9,7 +9,7 @@ Translate complete subtitle files into natural, screen-ready contemporary Modern
 
 Use the bundled Python pipeline for every subtitle task. The model must work only with timestamp-free intermediate files; Python alone may parse or write timed subtitle formats.
 
-Default to model translation by Codex. Do not use external machine-translation services or APIs for user-provided subtitles unless the user explicitly approves sending subtitle text to that service after the privacy risk is stated.
+Default to model translation via subagents. Do not use external machine-translation services, APIs, or local packages unless the user explicitly approves sending subtitle text to that service after the privacy risk is stated.
 
 # Interpret the user's intent
 
@@ -17,7 +17,7 @@ Choose one mode from the prompt:
 
 1. **Full translation** — The user asks to translate a file. Generate the guide, immediately use it to translate the entire file, rebuild the requested format, and validate it. Do not stop for approval.
 2. **Guide only** — The user asks to generate, prepare, or review the translation guide. Generate the guide and stop before translating. Save resumable state.
-3. **Approval continuation** — A later message such as `Lgtm`, `LGTM`, `looks good`, `approved`, or an equivalent approval means: load the active saved session and complete the translation immediately. Do not regenerate the guide and do not ask for confirmation again.
+3. **Approval continuation** — A later message such as `Lgtm`, `LGTM`, `looks good`, `approved`, or an equivalent approval means: load the active saved session and complete the translation immediately. Do not regenerate the guide.
 4. **Guide feedback** — Apply the feedback consistently to the guide and keep the session in `awaiting_approval` state. Translate only after approval unless the feedback message also explicitly says to continue.
 
 For guide-only workflows, approval continuation is expected to occur in the same Codex thread and project directory.
