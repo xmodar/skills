@@ -1,50 +1,47 @@
 ---
 name: svgo
-description: SVG asset engineering with the published `svgo` Python package via `uvx svgo` and `uv run --with svgo`; use for path editing, SVG optimization, validation, measurement, sanitization, viewport normalization, conversion, PNG tracing, centerline reconstruction, and building reusable SVG conversion recipes.
+description: SVG asset engineering with the published `svgo` CLI via `uvx svgo` only; use for path editing, SVG optimization, validation, measurement, sanitization, viewport normalization, conversion, PNG tracing, centerline reconstruction, and reusable declarative SVG recipes.
 ---
 
 # SVGO
 
-Use the published Python package `svgo` as the SVG toolchain. For command-line
-work, run it through `uvx` so the command resolves from PyPI without relying on
-a repository checkout or a preinstalled executable.
+Use the published `svgo` command through `uvx` for every task.
 
 Base commands:
 
 ```bash
 uvx svgo --help
 uvx svgo <command> --help
+uvx svgo recipe --help
 ```
 
-Do not pin the package in skill examples. Use the current published `svgo`
-command unless the user explicitly asks for a reproducible historical run.
+Do not rely on repository checkouts, local helper scripts, package imports,
+language runtimes, Node tooling, or separate image/vector utilities for normal
+skill work. If a workflow needs batching, repeatability, heuristics, reports,
+or several operations, build a `svgo recipe` JSON file and run it with
+`uvx svgo recipe run`.
 
-For Python recipes, run Python through `uv` and install `svgo` into that command
-environment:
-
-```bash
-uv run --with svgo python recipe.py
-uv run --with svgo python -c "from svgo import optimize_svg; print(optimize_svg('<svg><rect width=\"10\" height=\"10\"/></svg>'))"
-```
+Do not pin the package in examples. Use the current published command unless
+the user explicitly asks for a reproducible historical run.
 
 ## Operating Rules
 
 1. Preserve source files unless the user explicitly asks for replacement. Write
-   outputs to new paths such as `*.min.svg`, `*.safe.svg`, `*.flat.svg`, or a
-   dedicated output directory.
-2. Prefer existing SVG/vector input over PNG tracing. Trace PNGs only when no
-   better vector source exists.
-3. Use the shortest reliable workflow first: a single `uvx svgo` command for
-   one-off file work, a Python recipe when the task needs batching,
-   per-component decisions, reports, heuristics, or multiple public APIs.
-4. Run `uvx svgo <command> --help` before using uncommon flags or when the
-   local package may have changed.
-5. Validate and inspect after structural changes. Render or otherwise visually
-   inspect results when tracing, centerlining, flattening transforms, or editing
-   path geometry.
-6. Optimize near the end of the pipeline. For path-index-specific edits, avoid
-   optimizing before selection unless the user asks for `--svgo-order before`,
-   because optimizer passes can change path order and structure.
+   outputs to new paths such as `*.min.svg`, `*.safe.svg`, `*.flat.svg`,
+   `*.stroke.svg`, or a dedicated output directory.
+2. Prefer a single `uvx svgo` command for one-off work. Prefer a recipe when a
+   pipeline has more than two steps, needs batch processing, needs a report, or
+   has lossy choices.
+3. Run `uvx svgo <command> --help` before using uncommon flags or when the
+   package may have changed.
+4. Validate after structural changes. Visually inspect rendered output when
+   tracing, centerlining, flattening transforms, or editing path geometry.
+5. Optimize near the end of the pipeline. For path-index-specific edits, avoid
+   whole-SVG optimization before selection unless the user asks for
+   `--svgo-order before`, because optimizer passes can change path order and
+   structure.
+6. Treat PNG tracing and centerline reconstruction as lossy. Keep reports when
+   converting many assets or when choosing thresholds.
 
 ## Command Map
 
@@ -64,11 +61,147 @@ The CLI commands and aliases are:
 - `convert` or `x`: convert shapes, flatten transforms/groups, inline styles,
   sanitize, and remove editor-oriented markup.
 - `plugins` or `l`: list built-in optimizer plugins and presets.
+- `recipe` or `r`: initialize and run declarative JSON recipes.
+
+## Recipe Building
+
+Use recipes to express reusable SVG workflows as JSON. The recipe runner applies
+steps in process through `uvx svgo`, so the invocation stays:
+
+```bash
+uvx svgo recipe init --kind cleanup --output cleanup.svgo.json
+uvx svgo recipe run --recipe cleanup.svgo.json --input source.svg --output source.min.svg --report report.json
+uvx svgo recipe run --recipe cleanup.svgo.json --input icons --output icons-out --report report.json
+```
+
+Recipe shape:
+
+```json
+{
+  "name": "svg-cleanup",
+  "description": "Short human note",
+  "outputExtension": ".svg",
+  "steps": [
+    { "command": "sanitize", "removeExternalRefs": true },
+    { "command": "convert", "all": true, "precision": 3 },
+    { "command": "viewbox", "fitContent": true, "padding": 1, "removeDimensions": true, "precision": 3 },
+    { "command": "validate", "strict": true },
+    { "command": "opt", "multipass": true, "precision": 3 }
+  ]
+}
+```
+
+Step commands are normal `svgo` commands. Use long option names converted to
+JSON keys: `fitContent`, `removeDimensions`, `svgPaths`, `bridgeGap`,
+`strokeWidth`, `dropWhite`, `whiteThreshold`, `alphaThreshold`, `minArea`,
+`multipass`, and `precision`.
+
+Recipe actions:
+
+- `uvx svgo recipe init --kind cleanup`: starter sanitize/convert/viewbox/validate/opt recipe.
+- `uvx svgo recipe init --kind centerline-icons`: starter PNG-to-centerline recipe.
+- `uvx svgo recipe init --kind path-edit`: starter path operation recipe.
+- `uvx svgo recipe run -r recipe.json -i input.svg -o output.svg`: run one file.
+- `uvx svgo recipe run -r recipe.json -i input-dir -o output-dir --report report.json`: batch SVG/PNG files.
+
+Use `validate` steps as gates. Use `info` and `measure` steps for reports
+without changing the current SVG. A recipe step with `validate` fails the
+recipe on invalid output by default; set `"fail": false` only when the report
+should collect invalid cases without stopping.
+
+### Cleanup Recipe
+
+Use this for untrusted, editor-exported, or layout-specific SVGs:
+
+```json
+{
+  "name": "svg-cleanup",
+  "outputExtension": ".svg",
+  "steps": [
+    { "command": "validate", "strict": false, "fail": false },
+    { "command": "sanitize", "removeExternalRefs": true },
+    { "command": "convert", "all": true, "precision": 3 },
+    { "command": "viewbox", "fitContent": true, "padding": 1, "removeDimensions": true, "precision": 3 },
+    { "command": "validate", "strict": true },
+    { "command": "opt", "multipass": true, "precision": 3 }
+  ]
+}
+```
+
+Run it:
+
+```bash
+uvx svgo recipe run --recipe cleanup.svgo.json --input source.svg --output source.clean.svg --report cleanup.report.json
+```
+
+### PNG Centerline Recipe
+
+Use this for palette PNG line icons that should become stroked SVG paths:
+
+```json
+{
+  "name": "centerline-icons",
+  "outputExtension": ".svg",
+  "steps": [
+    {
+      "command": "trace",
+      "mode": "palette",
+      "palette": ["#143861", "#00b795"],
+      "dropWhite": true,
+      "whiteThreshold": 245,
+      "alphaThreshold": 16,
+      "minArea": 80,
+      "decimals": 1
+    },
+    {
+      "command": "center",
+      "svgPaths": "all",
+      "mode": "all",
+      "polyline": true,
+      "bridgeGap": 12,
+      "keepFailed": true,
+      "strokeWidth": "auto",
+      "decimals": 2
+    },
+    { "command": "opt", "multipass": true, "precision": 2 }
+  ]
+}
+```
+
+Run it:
+
+```bash
+uvx svgo recipe run --recipe centerline-icons.svgo.json --input input-pngs --output output-svgs --report centerline.report.json
+```
+
+Tune `palette`, `minArea`, `bridgeGap`, `polyline`, `mode`, `simplify`,
+`maxSize`, and `strokeWidth` by inspecting the rendered result and the report.
+
+### Path Edit Recipe
+
+Use this for repeated transforms or normalization of path `d` attributes:
+
+```json
+{
+  "name": "path-edit",
+  "outputExtension": ".svg",
+  "steps": [
+    {
+      "command": "path",
+      "select": "all",
+      "ops": ["matrix(1,0,0,1,2,-1)", "absolute", "optimize:safe"],
+      "decimals": 3,
+      "minify": true
+    },
+    { "command": "opt", "multipass": true, "precision": 3 }
+  ]
+}
+```
 
 ## Path Editing
 
 Use `path` for raw path data or SVG `d` attribute edits. Operations are applied
-in the order they are provided.
+in the order provided.
 
 ```bash
 uvx svgo path --path "M10 10h5v5z" --op optimize:safe --minify
@@ -150,24 +283,10 @@ uvx svgo t -i icon.png -o components.json --components-json --palette "#143861,#
 uvx svgo trace --input mono.png --output mono.svg --mode alpha --drop-white --alpha-threshold 16
 ```
 
-Tracing options:
-
-- `--mode palette|alpha|exact`
-- `--curve-mode pixel|exact`
-- `--components-json`
-- `--drop-white`
-- `--alpha-threshold N`
-- `--white-threshold N`
-- `--quantize N`
-- `--max-colors N`
-- `--min-area N`
-- `--scale N`
-- `--decimals N`
-- `--palette "#RRGGBB,..."`
-- `--title TEXT`
-
-Choose `palette` for colored icons, `alpha` for single-color masks, and
-`exact` only when color fidelity matters more than path count.
+Options include `--mode palette|alpha|exact`, `--curve-mode pixel|exact`,
+`--components-json`, `--drop-white`, `--alpha-threshold`, `--white-threshold`,
+`--quantize`, `--max-colors`, `--min-area`, `--scale`, `--decimals`,
+`--palette`, and `--title`.
 
 Use `trace2` when the user provides VTracer-style settings or expects those
 option names:
@@ -213,8 +332,8 @@ Important options:
 - `--keep-failed`
 - `--bridge-gap N`
 
-Centerline reconstruction is lossy. Inspect the rendered output before final
-optimization. Use `--mode all` for branched or multi-loop outlines, and
+Centerline reconstruction is approximate. Inspect the rendered output before
+final optimization. Use `--mode all` for branched or multi-loop outlines, and
 `--bridge-gap` when skeleton chains are fragmented but should reconnect.
 
 ## Inspect, Validate, Measure
@@ -260,161 +379,30 @@ Convert options include `--to-plain`, `--shapes-to-paths`,
 `--all`, and `--precision`. With no conversion flag, `convert` defaults to
 shape-to-path conversion.
 
-## Recipe Building
+## SVG Mechanisms Context
 
-Build a Python recipe when the task needs any of these:
+Use this context when choosing commands or recipe steps:
 
-- batch conversion with consistent naming, output directories, reports, or
-  parallelism;
-- per-component decisions from traced PNG component JSON;
-- combining trace, centerline, path cleanup, metric checks, and final
-  optimization;
-- preserving colors/groups while simplifying geometry;
-- heuristics such as dot detection, solid-line fallback, branch preservation,
-  radial centerline candidates, or custom quality thresholds;
-- producing repeatable artifacts for many input files.
-
-Run recipe scripts with:
-
-```bash
-uv run --with svgo python recipes/my_recipe.py INPUT OUTPUT
-```
-
-Recipe structure:
-
-1. Parse paths and options with `argparse` and `pathlib`.
-2. Read inputs without overwriting originals.
-3. Normalize unsafe or editor-heavy SVGs with `sanitize_svg`,
-   `inline_styles_svg`, `convert_shapes_svg`, `flatten_svg`, or `to_plain_svg`.
-4. Use `trace_png_components` for PNGs when component-level color, area, bbox,
-   and path decisions matter.
-5. Use `centerline_path_data` or `centerline_svg_text` for filled stroke
-   outlines; evaluate multiple `CenterlineOptions` when needed.
-6. Use path helpers to simplify, stitch, measure, and serialize candidate
-   geometry.
-7. Use `validate_svg`, `get_svg_info`, `path_metrics`, or `svg_metrics` for
-   gates and reports.
-8. Run `optimize_svg` last, unless intermediate optimization is needed for a
-   specific heuristic.
-9. Write a JSON report when a recipe makes lossy choices or processes many
-   assets.
-
-Public imports commonly used in recipes:
-
-```python
-from svgo import (
-    BUILTIN_PLUGINS,
-    CenterlineOptions,
-    OptimizeOptions,
-    PathData,
-    PluginSpec,
-    TraceOptions,
-    VTracerOptions,
-    centerline_path_data,
-    centerline_svg_text,
-    circle_to_path,
-    convert_shapes_svg,
-    detect_polyline_accuracy,
-    ellipse_to_path,
-    filled_loops,
-    fit_viewbox_svg,
-    flatten_svg,
-    get_svg_info,
-    inline_styles_svg,
-    line_to_path,
-    normalize_color,
-    optimize_path_data,
-    optimize_svg,
-    path_bbox,
-    path_length,
-    path_metrics,
-    point_at_length,
-    polygon_to_path,
-    polyline_lengths,
-    polyline_subpaths,
-    polyline_to_path,
-    radial_centerline_candidate,
-    rect_to_path,
-    remove_collinear_points,
-    resize_svg,
-    sanitize_svg,
-    serialize_polyline_subpaths,
-    set_viewbox_svg,
-    simplify_closed_points,
-    simplify_points,
-    simplify_radial_distance,
-    simplify_rdp,
-    stitch_subpaths,
-    svg_metrics,
-    to_plain_svg,
-    trace_image_vtracer,
-    trace_png,
-    trace_png_components,
-    transform_path,
-    validate_svg,
-)
-```
-
-Minimal batch recipe pattern:
-
-```python
-from __future__ import annotations
-
-import argparse
-import json
-from pathlib import Path
-
-from svgo import OptimizeOptions, fit_viewbox_svg, optimize_svg, sanitize_svg, validate_svg
-
-
-def process_svg(src: Path, dst: Path, decimals: int) -> dict:
-    original = src.read_text(encoding="utf-8")
-    safe = sanitize_svg(original, remove_external_refs=True)
-    fitted = fit_viewbox_svg(safe, padding=1, precision=decimals, remove_dimensions=True)
-    optimized = optimize_svg(fitted, OptimizeOptions(float_precision=decimals, multipass=True))
-    report = validate_svg(optimized, strict=True)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(optimized, encoding="utf-8")
-    return {"input": str(src), "output": str(dst), "valid": report["valid"]}
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input", type=Path)
-    parser.add_argument("output", type=Path)
-    parser.add_argument("--decimals", type=int, default=3)
-    parser.add_argument("--report", type=Path)
-    args = parser.parse_args()
-
-    inputs = [args.input] if args.input.is_file() else sorted(args.input.glob("*.svg"))
-    results = [
-        process_svg(path, args.output / path.name if args.output.suffix == "" else args.output, args.decimals)
-        for path in inputs
-    ]
-    if args.report:
-        args.report.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-```
-
-Advanced PNG-to-centerline recipe pattern:
-
-1. `trace_png_components(path, TraceOptions(mode="palette", palette=(...), drop_white=True, min_area=...))`
-2. Sort components by color, area, and bbox for deterministic output.
-3. For each component, try `radial_centerline_candidate` for two-loop radial
-   outlines, `centerline_path_data(..., CenterlineOptions(mode="all",
-   polyline=True, bridge_gap=...))` for branched outlines, and
-   `centerline_path_data(..., CenterlineOptions(mode="longest"))` for simple
-   strokes.
-4. Use `polyline_subpaths`, `polyline_lengths`, `stitch_subpaths`,
-   `turn_stats`, `remove_collinear_points`, and `simplify_rdp` to decide
-   whether to keep polyline output or smooth cubic output.
-5. Serialize grouped `<path>` elements by color, then call `optimize_svg`.
-6. Include per-file counts, stroke widths, fallback types, and errors in a
-   report.
+- `viewBox` defines the coordinate system. Prefer fitting or setting it before
+  final optimization, and remove `width`/`height` for scalable icons when
+  appropriate.
+- Path `d` order matters for `--select` indexes. Whole-document optimization
+  can merge, remove, or reorder paths.
+- `transform` attributes compose down the tree. Use `convert --flatten-transforms`
+  before measuring, centerlining, or comparing geometry when inherited
+  transforms matter.
+- CSS classes and style elements may carry fills, strokes, opacity, or display
+  state. Use `convert --inline-styles` or `convert --all` when a standalone SVG
+  must preserve visible appearance without external CSS.
+- IDs can be referenced by gradients, masks, clips, markers, filters, CSS,
+  `<use>`, sprites, or host documents. Disable `cleanupIds` or use `prefixIds`
+  when references matter.
+- Sanitizing removes active content and can remove external references, style
+  content, and raster images depending on flags. Preserve semantically useful
+  `<title>` or `<desc>` unless the user wants decorative output.
+- Tracing turns pixels into filled paths. `center` turns filled paths into
+  approximate strokes. Tune thresholds with rendered inspection, not byte size
+  alone.
 
 ## Common Pipelines
 
@@ -449,6 +437,5 @@ uvx svgo center -i outline.svg -o outline.stroke.svg --svg-paths all --mode all 
 uvx svgo opt -i outline.stroke.svg -o outline.stroke.min.svg --svgo-multipass --svgo-precision 3
 ```
 
-Use the existing `recipes/two_color_centerline_icons.py` pattern when a task
-asks for two-color antialiased PNG line icons, grouped output paths per color,
-branch-preserving centerlines, and conversion reports.
+When a task asks for a reusable workflow, create or update a `.svgo.json`
+recipe and run it with `uvx svgo recipe run`.
