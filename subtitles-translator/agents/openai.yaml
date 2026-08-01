@@ -1,0 +1,4 @@
+interface:
+  display_name: "Subtitles Translator"
+  short_description: "Translate SRT subtitles while preserving structure"
+  default_prompt: "Use $subtitles-translator to translate this SRT file into my requested language."

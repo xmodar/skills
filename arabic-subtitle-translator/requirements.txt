@@ -1,2 +1,0 @@
-pysubs2==1.8.1
-charset-normalizer>=3.4,<4
