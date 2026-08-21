@@ -1,4 +1,0 @@
-interface:
-  display_name: "SVGO"
-  short_description: "Edit, optimize, and batch SVGs with uvx svgo"
-  default_prompt: "Use $svgo through uvx svgo to edit this SVG, optimize it, or build a reusable recipe."
