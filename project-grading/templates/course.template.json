@@ -1,0 +1,41 @@
+{
+ "content_url": "https://<course site>",
+ "instructor_chat_names": [
+  "SDAIA Academy"
+ ],
+ "rollcall_keyword": "تحضير",
+ "window_before_min": 1,
+ "window_after_min": 3,
+ "lenient_days": [],
+ "extra_windows": {},
+ "rubric": {
+  "criteria": [
+   [
+    "Functional end-to-end",
+    35
+   ],
+   [
+    "Model selection & implementation",
+    30
+   ],
+   [
+    "Evaluation & error analysis",
+    25
+   ],
+   [
+    "Presentation & reproducibility",
+    10
+   ]
+  ],
+  "bonus": [
+   "Fine-tuning bonus",
+   15
+  ],
+  "cap": 100,
+  "pass_mark": 70,
+  "link_check_label": "SDAIA link in README"
+ },
+ "certificate_min_attendance_points": 1,
+ "certificates_footnote": "تتضمن القائمة كل من سُجّل حضوره في يوم واحد على الأقل.",
+ "notes": []
+}
