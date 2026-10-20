@@ -1,5 +1,6 @@
 {
  "content_url": "https://<course site>",
+ "attendance_source": "chat",
  "instructor_chat_names": [
   "SDAIA Academy"
  ],
@@ -37,5 +38,20 @@
  },
  "certificate_min_attendance_points": 1,
  "certificates_footnote": "تتضمن القائمة كل من سُجّل حضوره في يوم واحد على الأقل.",
- "notes": []
+ "notes": [],
+ "classpulse": {
+  "utc_offset_hours": 3,
+  "present_min": 0.65,
+  "late_min": 0.25,
+  "joined_counts_as_late": false,
+  "no_late_days": [],
+  "new_batch": {
+   "admitted_day": null,
+   "mark_before": "Absent",
+   "mark_admitted_day": null
+  },
+  "leave_if_never_present": true,
+  "aliases": {},
+  "exclude": []
+ }
 }

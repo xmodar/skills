@@ -18,6 +18,9 @@
         sends only the differences (safe to re-run). Dates come from the Attendance date headers; the program
         from the Certificates "رابط البرنامج" link (or --program). Writes athkax_roster.json, athkax_mismatches.json and attendance_plan.csv.
 
+    uv run athkax.py roster <program link or slug> [--out DIR]
+        Save the batch's learners (batch-learner id, name, email, Nafath ID) to DIR/students.json.
+
     uv run athkax.py programs            list your ongoing programs (slug, title, batches)
 
 Auth: no token is stored in this file. The session token is read from the OS keyring (saved after a
@@ -41,7 +44,7 @@ import openpyxl
 EventStatus = Literal["ongoing", "upcoming", "completed", "cancelled"]
 Attendance = Literal["present", "late", "absent", "leave", "unmarked"]
 Language = Literal["ar", "en"]
-SHEET_TO_PLATFORM = {"present": "present", "late": "late", "absent": "absent"}
+SHEET_TO_PLATFORM = {"present": "present", "late": "late", "absent": "absent", "leave": "leave"}
 SLUG_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 BASE = "https://athkax.sdaia.gov.sa"
 
@@ -53,6 +56,7 @@ class AthkaXClient(httpx.AsyncClient):
             base_url=BASE,
             timeout=30,
             follow_redirects=True,
+            headers={"accept": "application/json, text/plain, */*", "accept-language": "ar", "referer": f"{BASE}/"},
             limits=httpx.Limits(max_connections=connections, max_keepalive_connections=connections),
         )
 
@@ -107,9 +111,16 @@ class AthkaXClient(httpx.AsyncClient):
             await asyncio.sleep(2)
         return False
 
+    async def _token_works(self) -> bool:
+        r = await self.get("/api/v1/instructor/events/ongoing", params={"page": 1, "perPageItems": 12})
+        return r.status_code not in (401, 403)
+
     async def ensure_login(self, nafath_id: str | None) -> None:
         if os.environ.get("ATHKAX_TOKEN"):
             self.token = os.environ["ATHKAX_TOKEN"]
+        if self.session_ttl >= 60 and not await self._token_works():
+            print("Saved AthkaX session was refused (401/403) — signing in again with Nafath.")
+            self.token = None
         if self.session_ttl < 60:
             nid = nafath_id or input("Nafath (National/Iqama) ID: ").strip()
             if not await self.login(nid):
@@ -131,11 +142,19 @@ class AthkaXClient(httpx.AsyncClient):
         return await self.json(f"/api/v1/public/events/{slug}/training_weeks", locale=lang, page=False)
 
     async def get_programs(self, status: EventStatus = "ongoing") -> Any:
-        return await self.json(f"/api/v1/instructor/events/{status}", page=False)
+        return await self.json(f"/api/v1/instructor/events/{status}", page=1, perPageItems=50)
 
     async def get_roster(self, slug: int | str, batch: int | str, date: dt.date | None = None) -> Any:
         url = f"/api/v1/instructor/events/{slug}/batches/{batch}/batch_learners/attendances"
-        return await self.json(url, date=str(date or dt.date.today()), page=False)
+        learners, page = [], 1
+        while page:
+            r = await self.json(url, page=page, date=str(date or dt.date.today()))
+            learners += r.get("batchLearners") or []
+            page = (r.get("pagination") or {}).get("next")
+        return {"batchLearners": learners}
+
+    async def get_learner(self, slug: int | str, event_learner: int | str) -> Any:
+        return await self.json(f"/api/v1/instructor/events/{slug}/event_learners/{event_learner}", locale="ar")
 
     async def mark_attendance(self, slug: int | str, batch_learner: int | str,
                               mark: Attendance = "unmarked", date: dt.date | None = None) -> Any:
@@ -266,6 +285,32 @@ async def cmd_programs(args) -> None:
             print(f"- {e.get('title') or e.get('name') or ''} | {BASE}/programs/{e['slug']} | batches: {batches}")
 
 
+async def cmd_roster(args) -> None:
+    """Save the batch's learners (batch-learner id, name, email, Nafath ID) to students.json for the workbook."""
+    async with AthkaXClient() as client:
+        await client.ensure_login(args.nafath_id)
+        step = lambda name, e: SystemExit(f"{name}: HTTP {e.response.status_code} ({e.request.url.path})")
+        slug = slug_of(args.link)
+        try:
+            await client.get_instructor_program(slug)
+        except httpx.HTTPStatusError as e:
+            raise step("program details", e)
+        batch = await pick_batch(client, slug, args.batch)
+        learners = (await client.get_roster(slug, batch))["batchLearners"]
+        try:
+            details = await asyncio.gather(*(client.get_learner(slug, s["eventLearnerId"]) for s in learners))
+        except httpx.HTTPStatusError as e:
+            raise step("learner details (Nafath ID)", e)
+    rows = [{"id": s["id"], "name": ((s.get("learnerDetails") or {}).get("name") or "").strip(),
+             "email": ((s.get("learnerDetails") or {}).get("email") or "").strip().lower() or None,
+             "nafath": str(n.get("learnerNafathId") or "").strip() or None} for s, n in zip(learners, details)]
+    os.makedirs(args.out, exist_ok=True)
+    with open(os.path.join(args.out, "students.json"), "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=1)
+    print(f"students.json: {len(rows)} learners | batch {batch} | {sum(1 for r in rows if r['email'])} with email"
+          f" | {sum(1 for r in rows if r['nafath'])} with Nafath ID")
+
+
 # ---------------------------------------------------------------- attendance push
 def read_sheet(path: str) -> tuple[list[dt.date], dict[str, list[str]], str | None]:
     """Return (course dates, {email: [mark per day]}, program slug or None) from the workbook."""
@@ -300,12 +345,20 @@ def read_sheet(path: str) -> tuple[list[dt.date], dict[str, list[str]], str | No
 
 
 async def pick_batch(client: AthkaXClient, slug: str, batch: str | None) -> str:
+    """The batch as the roster endpoint accepts it: tries the batch slug, then the numeric id."""
     if batch:
         return batch
     batches = (await client.get_program(slug)).get("batches", [])
     if len(batches) != 1:
         raise SystemExit(f"Program has {len(batches)} batches — rerun with --batch ID: {[b['id'] for b in batches]}")
-    return batches[0]["id"]
+    tried = []
+    for cand in dict.fromkeys(str(x) for x in (batches[0].get("id"), batches[0].get("slug")) if x):
+        try:
+            await client.json(f"/api/v1/instructor/events/{slug}/batches/{cand}/batch_learners/attendances", page=1, date=str(dt.date.today()))
+            return cand
+        except httpx.HTTPStatusError as e:
+            tried.append(f"{cand} -> {e.response.status_code}")
+    raise SystemExit(f"Roster endpoint refused every batch form: {'; '.join(tried)}")
 
 
 async def cmd_attendance(args) -> None:
@@ -324,7 +377,7 @@ async def cmd_attendance(args) -> None:
         with open(os.path.join(out_dir, "athkax_roster.json"), "w", encoding="utf-8") as f:
             json.dump({d.isoformat(): r for d, r in zip(dates, rosters)}, f, ensure_ascii=False, indent=1)
         current: dict[tuple[int, dt.date], str] = {}
-        learners: dict[str, int] = {}
+        learners: dict[str, list[int]] = {}   # email -> batch-learner ids (AthkaX may enrol a person twice)
         no_email = 0
         for d, r in zip(dates, rosters):
             for s in r["batchLearners"]:
@@ -332,12 +385,14 @@ async def cmd_attendance(args) -> None:
                 if not email:
                     no_email += d == dates[0]
                     continue
-                learners[email] = s["id"]
+                if s["id"] not in learners.setdefault(email, []):
+                    learners[email].append(s["id"])
                 current[(s["id"], d)] = (s.get("availabilityByDate") or {}).get("availability") or "unmarked"
         only_sheet = sorted(sheet.keys() - learners.keys())
         only_platform = sorted(learners.keys() - sheet.keys())
         print(f"program {slug} batch {batch} | {dates[0]}..{dates[-1]} ({len(dates)} days)"
-              f" | sheet {len(sheet)} | platform {len(learners)} (+{no_email} without email, untouched)")
+              f" | sheet {len(sheet)} | platform {len(learners)} people / {sum(map(len, learners.values()))} records"
+              f" (+{no_email} without email, untouched)")
         with open(os.path.join(out_dir, "athkax_mismatches.json"), "w", encoding="utf-8") as f:
             json.dump({"only_on_sheet": only_sheet, "only_on_platform": only_platform}, f, ensure_ascii=False, indent=1)
         short = lambda xs: ", ".join(xs[:5]) + (f" … (+{len(xs) - 5})" if len(xs) > 5 else "")
@@ -346,13 +401,14 @@ async def cmd_attendance(args) -> None:
         if only_platform:
             print(f"only on platform ({len(only_platform)}, set to {args.default}): {short(only_platform)}")
         plan = []
-        for email, lid in learners.items():
+        for email, lids in learners.items():
             marks = sheet.get(email)
             never = marks is None or (args.skip_all_absent and all(m in ("absent", "") for m in marks))
-            for i, d in enumerate(dates):
-                want = args.default if never else SHEET_TO_PLATFORM.get(marks[i])
-                if want and current.get((lid, d)) != want:
-                    plan.append((email, lid, d, current.get((lid, d)), want))
+            for lid in lids:
+                for i, d in enumerate(dates):
+                    want = args.default if never else SHEET_TO_PLATFORM.get(marks[i])
+                    if want and current.get((lid, d)) != want:
+                        plan.append((email, lid, d, current.get((lid, d)), want))
         with open(os.path.join(out_dir, "attendance_plan.csv"), "w", encoding="utf-8") as f:
             f.write("email,date,current,new\n" + "".join(f"{e},{d},{c},{w}\n" for e, _, d, c, w in plan))
         summary: dict[str, int] = {}
@@ -376,6 +432,10 @@ def main() -> None:
     p.add_argument("link", help="program link (https://athkax.sdaia.gov.sa/programs/<slug>) or slug")
     p.add_argument("--out", default=".", help="folder for program.json / program_raw.json (default: current)")
     sub.add_parser("programs", help="list your ongoing programs")
+    ro = sub.add_parser("roster", help="save the batch's learners (id, name, email, Nafath ID) to students.json")
+    ro.add_argument("link", help="program link or slug")
+    ro.add_argument("--batch", help="batch slug or id (default: the program's only batch)")
+    ro.add_argument("--out", default=".", help="folder for students.json (default: current)")
     t = sub.add_parser("attendance", help="push the workbook's Attendance sheet to AthkaX")
     t.add_argument("workbook")
     t.add_argument("--program", help="program link or slug (default: the link in the Certificates sheet)")
@@ -387,7 +447,7 @@ def main() -> None:
     t.add_argument("--dry-run", action="store_true", help="show the plan without changing anything")
     t.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     args = ap.parse_args()
-    asyncio.run({"program": cmd_program, "programs": cmd_programs, "attendance": cmd_attendance}[args.cmd](args))
+    asyncio.run({"program": cmd_program, "programs": cmd_programs, "attendance": cmd_attendance, "roster": cmd_roster}[args.cmd](args))
 
 
 if __name__ == "__main__":

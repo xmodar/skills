@@ -6,16 +6,20 @@ Usage:
 
 COURSE_DIR must contain:
     course.json   - course settings and rubric (see SKILL.md); program fields may come from program.json
-    students.json - roster: [{"name": ..., "email": ...}, ...]
-    chat-YYYY-MM-DD.xlsx - one chat export per day (columns: timestamp | user | text)
+    students.json - roster: [{"name": ..., "email": ...}, ...] (`athkax.py roster` adds "id" and "nafath")
+and one attendance source:
+    chat-YYYY-MM-DD.xlsx   - one Webex chat export per day (columns: timestamp | user | text), or
+    classpulse_marks.json  - ClassPulse marks written by `classpulse.py` (used when present, or when
+                             course.json "attendance_source" is "classpulse")
 and may contain:
     program.json  - AthkaX program details saved by `athkax.py program <link>` (name, instructor, dates, link)
-    aliases.json  - {"chat display name": "roster email" | "#<roster index>" | "+<extra key>"}
+    aliases.json  - {"chat or ClassPulse name": "roster email" | "#<roster index>" | "+<extra key>"}
     extras.json   - {"<key>": {"name": ..., "email": null}}  people in chat but not on roster
     grades.json   - list of graded projects (see SKILL.md)
 
---check only reports unmapped chat names and roll-call windows; it writes nothing.
-Exit code 2 = unmapped chat users remain (map them in aliases.json, then rerun).
+--check only reports unmapped names and roll-call windows; it writes nothing.
+Exit code 2 = unmapped chat users remain (map them in aliases.json, then rerun). Unmatched ClassPulse
+people are listed with candidates and added as unregistered extras (no email, never synced, no certificate).
 """
 import argparse, datetime as dt, difflib, json, os, re, sys
 
@@ -35,7 +39,9 @@ ZEBRA = [PatternFill("solid", fgColor="FFFFFF"), PatternFill("solid", fgColor="F
 KEY = PatternFill("solid", fgColor="E2F0D9")           # computed key columns (Attendance %, Project %)
 FILL = {"Present": PatternFill("solid", fgColor="C6E0B4"),
         "Late": PatternFill("solid", fgColor="FFE699"),
-        "Absent": PatternFill("solid", fgColor="F8CBAD")}
+        "Absent": PatternFill("solid", fgColor="F8CBAD"),
+        "Leave": PatternFill("solid", fgColor="D9D9D9")}
+RANK = ["Absent", "Leave", "Late", "Present"]
 THIN = Side(style="thin", color="D9D9D9")
 BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 CENTER = Alignment(horizontal="center", vertical="center")
@@ -79,6 +85,45 @@ def body(ws, r, c, value=None, *, align=TOP, fill=None, font=None, fmt=None, zeb
     return x
 
 
+def from_classpulse(cp, days, people, roster, aliases, resolve, default_mark):
+    """Map classpulse_marks.json people to roster keys: alias → Nafath ID → email → name; the rest become +CPn extras.
+
+    Returns (chats-like day logs, status, seen names, notes, unmatched people). Two ClassPulse identities that resolve
+    to one learner keep the better mark per day; roster learners never seen in ClassPulse get `default_mark`."""
+    digits = lambda s: re.sub(r"\D", "", str(s or ""))
+    by_naf = {digits(s.get("nafath")): "#%d" % i for i, s in enumerate(roster) if digits(s.get("nafath"))}
+    by_email = {(e or "").strip().lower(): k for k, _, e in people if e}
+    by_name = {norm(n): k for k, n, _ in people if n}
+    status, seen, notes, unmatched = {}, {}, [], []
+    for p in cp["people"]:
+        k = next((resolve(aliases[n]) for n in p["names"] if n in aliases), None)
+        k = k or next((by_naf[digits(r)] for r in p["rosterIds"] if "@" not in r and digits(r) in by_naf), None)
+        k = k or next((by_email[r.strip().lower()] for r in p["rosterIds"] if r.strip().lower() in by_email), None)
+        k = k or next((by_name[norm(n)] for n in p["names"] if norm(n) in by_name), None)
+        if not k:
+            k = "+CP%d" % (len(unmatched) + 1)
+            people.append((k, p["name"], None))
+            unmatched.append(p)
+        elif k in status:
+            notes.append(f"{dict((x, n) for x, n, _ in people)[k]}: several ClassPulse identities "
+                         f"({', '.join(seen[k] + p['names'])}); the better mark is kept each day.")
+        cur = status.setdefault(k, {})
+        for d, m in p["marks"].items():
+            if d in days:
+                di = days.index(d)
+                if cur.get(di) is None or RANK.index(m) > RANK.index(cur[di]):
+                    cur[di] = m
+        seen.setdefault(k, [])
+        seen[k] += [n for n in p["names"] if n not in seen[k]]
+    held = set(cp["days"])
+    for k, _, _ in people:
+        if k not in status:
+            status[k] = {days.index(d): default_mark for d in held if d in days}
+    chats = [[(f"{ds} {t}", "Trainer" if tr else u, x) for t, u, x, tr in cp["logs"][ds]] if ds in held else None
+             for ds in days]
+    return chats, status, seen, notes, unmatched
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("course_dir")
@@ -92,6 +137,11 @@ def main():
         if prog.get(k) and not cfg.get(k):
             cfg[k] = prog[k]
     roster = load(os.path.join(D, "students.json"))
+    # AthkaX can enrol the same person twice (same Nafath ID/email): one row per person; athkax.py marks both records
+    uniq = {}
+    for s in roster:
+        uniq.setdefault(str(s.get("nafath") or (s.get("email") or "").strip().lower() or id(s)), s)
+    dup_enrol, roster = len(roster) - len(uniq), list(uniq.values())
     aliases = load(os.path.join(D, "aliases.json"), {})
     extras = load(os.path.join(D, "extras.json"), {})
     grades = load(os.path.join(D, "grades.json"), [])
@@ -126,9 +176,14 @@ def main():
 
     P = lambda s: dt.datetime.strptime(str(s)[:16], "%Y-%m-%d %H:%M")
 
-    # ---- chats
+    cp_path = os.path.join(D, "classpulse_marks.json")
+    source = cfg.get("attendance_source") or ("classpulse" if os.path.exists(cp_path) else "chat")
+    cpc = cfg.get("classpulse", {})
+
+    # ---- chats (attendance source "chat")
     status, seen, chats, unmapped, windows_log = {}, {}, [], {}, []
-    for di, ds in enumerate(days):
+    cp_notes, cp_unmatched = [], []
+    for di, ds in enumerate(days if source == "chat" else []):
         f = os.path.join(D, f"chat-{ds}.xlsx")
         if not os.path.exists(f):
             chats.append(None)
@@ -164,10 +219,27 @@ def main():
             if di in lenient:
                 status.setdefault(k, {})[di] = "Present"
 
-    print("chats:", "; ".join(f"{ds} {n} msgs, calls {','.join(calls) or 'NONE'}" for ds, calls, n in windows_log))
+    if source == "classpulse":                           # ---- ClassPulse checkpoints (see classpulse.py)
+        cp = load(cp_path)
+        if not cp:
+            sys.exit("attendance_source is classpulse but classpulse_marks.json is missing — run classpulse.py first")
+        default = "Leave" if cpc.get("leave_if_never_present") else "Absent"
+        chats, status, seen, cp_notes, cp_unmatched = from_classpulse(cp, days, people, roster, aliases, resolve, default)
+        instr = instr | {"Trainer"}
+        print(f"classpulse: {cp['source']} | checkpoints {cp['totals']} | {len(cp['people'])} people"
+              f" | matched {len(cp['people']) - len(cp_unmatched)} | not on roster {len(cp_unmatched)}"
+              + (f" | {dup_enrol} duplicate enrolments merged" if dup_enrol else ""))
+        if cp_unmatched:
+            print("\nClassPulse people not on the roster (map in aliases.json if they are; else flagged as unregistered):")
+            names = [n for k, n, _ in people if k.startswith("#")]
+            for p in cp_unmatched:
+                cand = difflib.get_close_matches(norm(p["name"]), [norm(n) for n in names], n=3, cutoff=0.4)
+                print(f"  {p['name']!r} ids={p['rosterIds']} days={ {d: v['answered'] for d, v in p['days'].items()} } candidates: {cand}")
+    else:
+        print("chats:", "; ".join(f"{ds} {n} msgs, calls {','.join(calls) or 'NONE'}" for ds, calls, n in windows_log))
     missing = [days[d] for d in range(ndays) if chats[d] is None]
     if missing:
-        print("no chat export yet:", ", ".join(missing))
+        print(f"no {'ClassPulse session' if source == 'classpulse' else 'chat export'} yet:", ", ".join(missing))
     if unmapped:
         print("\nUNMAPPED chat users (add to aliases.json or extras.json):")
         names = [n for _, n, _ in people if n]
@@ -186,9 +258,10 @@ def main():
         if not k:
             sys.exit(f"grades.json: cannot resolve student {g.get('student')!r}")
         gmap[k] = g
-    crit = cfg["rubric"]["criteria"]                     # [["Functional end-to-end", 35], ...]
-    bonus = cfg["rubric"].get("bonus")                   # ["Fine-tuning bonus", 15] or None
-    cap = cfg["rubric"].get("cap", 100)
+    rub = cfg.get("rubric") or {"criteria": []}       # rubric may be added later (attendance-only builds)
+    crit = rub["criteria"]                              # [["Functional end-to-end", 35], ...]
+    bonus = rub.get("bonus")                             # ["Fine-tuning bonus", 15] or None
+    cap = rub.get("cap", 100)
 
     def pscore(k):
         g = gmap.get(k)
@@ -230,7 +303,7 @@ def main():
     r = HR + 1
     for j in order:
         k, n, e = people[j]
-        if ascore(k) < min_att:
+        if ascore(k) < min_att or (source == "classpulse" and not e):   # ClassPulse: AthkaX learners only
             continue
         body(c, r, 1, n)
         body(c, r, 2, e)
@@ -253,7 +326,7 @@ def main():
 
     # ---- Attendance
     at = wb.create_sheet("Attendance")
-    header(at, 1, ["Name", "Email", "Chat Name"] + list(days) + ["Attendance"])
+    header(at, 1, ["Name", "Email", "ClassPulse Name" if source == "classpulse" else "Chat Name"] + list(days) + ["Attendance"])
     lastday = L(3 + ndays)
     for r, j in enumerate(order, 2):
         k, n, e = people[j]
@@ -281,7 +354,7 @@ def main():
     ph = ["Name", "Email", "Submission Link", "Commit Hash", "Use case"] + [f"{n} ({w})" for n, w in crit]
     if bonus:
         ph.append(f"{bonus[0]} (+{bonus[1]})")
-    ph += [cfg["rubric"].get("link_check_label", "Required link in README"), "Project", "Reasoning"]
+    ph += [rub.get("link_check_label", "Required link in README"), "Project", "Reasoning"]
     header(p, 1, ph)
     p.row_dimensions[1].height = 45
     first_c, last_s = L(6), L(5 + nc + nb)
@@ -307,7 +380,7 @@ def main():
         body(p, r, proj_col + 1, g.get("reasoning"), align=WRAP)
     lastp = max(len(graded) + 1, 2)
     p.conditional_formatting.add(f"{L(proj_col)}2:{L(proj_col)}{lastp}", ColorScaleRule(
-        start_type="num", start_value=0, start_color="F8696B", mid_type="num", mid_value=cfg["rubric"].get("pass_mark", 70) / 100,
+        start_type="num", start_value=0, start_color="F8696B", mid_type="num", mid_value=rub.get("pass_mark", 70) / 100,
         mid_color="FFEB84", end_type="num", end_value=cap / 100, end_color="63BE7B"))
     p.conditional_formatting.add(f"{L(6 + nc + nb)}2:{L(6 + nc + nb)}{lastp}",
                                  FormulaRule(formula=[f'{L(6 + nc + nb)}2="No"'], fill=FILL["Absent"]))
@@ -337,18 +410,49 @@ def main():
     # ---- Notes
     nt = wb.create_sheet("Notes")
     header(nt, 1, ["Notes"])
-    notes = [f"Present = the student posted any message from {before} minute(s) before through {after} minutes after any instructor message containing the word {kw}.",
-             "Late = the student posted at least one message during the day but did not post inside any attendance window.",
-             "Absent = the student posted no message during the day.",
-             f"Attendance = (2 × Present + Late) / (2 × Days), so Present counts as a full day and Late as half a day across {ndays} days.",
-             "Project = min(100, rubric criteria + bonus) / 100. المجموع = 70% × Project + 30% × Attendance; إجتياز needs المجموع > 65% and Attendance > 65%.",
-             "Rows are sorted by Attendance descending, then Project descending; ties retain the official roster order.",
-             "Chat display-name aliases were matched to official roster entries; all non-instructor chat users were mapped before export."]
+    if source == "classpulse":
+        pm, lm = cpc.get("present_min", 0.65), cpc.get("late_min", 0.25)
+        nb = cpc.get("new_batch") or {}
+        notes = [f"Source: ClassPulse checkpoint questions ({cp['source']}); only checkpoints that received at least one answer count: "
+                 + ", ".join(f"{d} {n}" for d, n in cp["totals"].items()) + ".",
+                 f"Present = answered at least {pm:.0%} of that day's checkpoints."
+                 + (f" Late = answered at least {lm:.0%}." if lm < pm else ""),
+                 ("Late also = joined the ClassPulse link that day (admitted, waiting or rejected) without reaching the Present mark. "
+                  if cpc.get("joined_counts_as_late") else "") + "Absent = did not join that day.",
+                 "Leave = not Present on any session day, including AthkaX learners never seen in ClassPulse (all session days)."
+                 if cpc.get("leave_if_never_present") else "AthkaX learners never seen in ClassPulse are Absent."]
+        if cpc.get("no_late_days"):
+            notes.append("No-Late day(s): " + ", ".join(days[i - 1] for i in cpc["no_late_days"]) + " — Late counts as Present.")
+        if nb.get("admitted_day"):
+            notes.append(f"New batch (first joined on {days[nb['admitted_day'] - 1]}, admitted late): {nb.get('mark_before', 'Absent')} before that day"
+                         + (f", {nb['mark_admitted_day']} on it" if nb.get("mark_admitted_day") else "") + ".")
+        notes += ["Duplicate ClassPulse identities (several devices, missing or mistyped ID, Arabic/English name) are merged; each checkpoint counts once.",
+                  "Matching to AthkaX: aliases.json, then Nafath ID, then email, then exact name. Names and emails shown are the official AthkaX ones.",
+                  "The date sheets list the ClassPulse checkpoint log (trainer rows in bold) instead of chat messages."]
+        if cpc.get("aliases"):
+            notes.append("Manual ClassPulse links: " + "; ".join(f"{k} = {v}" for k, v in cpc["aliases"].items()) + ".")
+        if cpc.get("exclude"):
+            notes.append("Excluded from ClassPulse data: " + ", ".join(cpc["exclude"]) + ".")
+        if dup_enrol:
+            notes.append(f"{dup_enrol} people are enrolled twice on AthkaX (same Nafath ID/email); listed once, and athkax.py marks both records.")
+        notes += cp_notes
+        notes += [f"{p['name']} [{', '.join(p['rosterIds']) or 'no ID'}]: in ClassPulse but not on the AthkaX batch; no email, not synced, no certificate — check registration."
+                  for p in cp_unmatched]
+    else:
+        notes = [f"Present = the student posted any message from {before} minute(s) before through {after} minutes after any instructor message containing the word {kw}.",
+                 "Late = the student posted at least one message during the day but did not post inside any attendance window.",
+                 "Absent = the student posted no message during the day."]
+    notes += [f"Attendance = (2 × Present + Late) / (2 × Days), so Present counts as a full day and Late as half a day across {ndays} days.",
+              "Project = min(100, rubric criteria + bonus) / 100. المجموع = 70% × Project + 30% × Attendance; إجتياز needs المجموع > 65% and Attendance > 65%.",
+              "Rows are sorted by Attendance descending, then Project descending; ties retain the official roster order."]
+    if source == "chat":
+        notes.append("Chat display-name aliases were matched to official roster entries; all non-instructor chat users were mapped before export.")
     if lenient:
         notes.append("Lenient day(s) by instructor decision: " + ", ".join(days[d] for d in sorted(lenient)) +
                      " — any chat message or a submitted project link counts as Present (no Late).")
     if missing:
-        notes.append("PARTIAL: no chat export yet for " + ", ".join(missing) + "; those days count as zero until added.")
+        notes.append(f"PARTIAL: no {'ClassPulse session' if source == 'classpulse' else 'chat export'} yet for "
+                     + ", ".join(missing) + "; those days count as zero until added.")
     notes += cfg.get("notes", [])
     for i, t in enumerate(notes, 2):
         body(nt, i, 1, t, align=WRAP)
