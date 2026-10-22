@@ -53,5 +53,17 @@
   "leave_if_never_present": true,
   "aliases": {},
   "exclude": []
+ },
+ "status_overrides": {},
+ "grading": {
+  "keep_higher_on_resubmit": false,
+  "bonus_max": 10,
+  "bonus_overrides": {},
+  "notes": {}
+ },
+ "_doc": {
+  "lenient_days": "1-based day numbers where any chat message (or a posted project link) counts as Present; works with ClassPulse too (chat fallback days)",
+  "status_overrides": "{\"<email>\": {\"<day number>\": \"Late\"}} instructor-excused marks, listed in Notes",
+  "grading": "read by merge_grades.py; bonus_overrides are instructor adjustments (noted in the reasoning)"
  }
 }

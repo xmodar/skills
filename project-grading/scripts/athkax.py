@@ -365,7 +365,13 @@ async def cmd_attendance(args) -> None:
     """Sync the sheet to the platform: fetch the current mark of every learner on every course date and
     send only the marks that differ (idempotent; safe to re-run). Learners not on the sheet, or absent on
     every day, are set to --default (leave)."""
-    dates, sheet, wb_slug = read_sheet(args.workbook)
+    all_dates, sheet, wb_slug = read_sheet(args.workbook)
+    dates = all_dates
+    if args.date:                                # only fetch and mark these dates (all-days rules still use every column)
+        want_dates = {dt.date.fromisoformat(d) for d in args.date}
+        if unknown := want_dates - set(all_dates):
+            raise SystemExit(f"--date not in the Attendance sheet: {', '.join(map(str, sorted(unknown)))}")
+        dates = [d for d in all_dates if d in want_dates]
     slug = slug_of(args.program) if args.program else wb_slug
     if not slug:
         raise SystemExit("No program link in the workbook — pass --program <link or slug>")
@@ -405,8 +411,8 @@ async def cmd_attendance(args) -> None:
             marks = sheet.get(email)
             never = marks is None or (args.skip_all_absent and all(m in ("absent", "") for m in marks))
             for lid in lids:
-                for i, d in enumerate(dates):
-                    want = args.default if never else SHEET_TO_PLATFORM.get(marks[i])
+                for d in dates:
+                    want = args.default if never else SHEET_TO_PLATFORM.get(marks[all_dates.index(d)])
                     if want and current.get((lid, d)) != want:
                         plan.append((email, lid, d, current.get((lid, d)), want))
         with open(os.path.join(out_dir, "attendance_plan.csv"), "w", encoding="utf-8") as f:
@@ -444,6 +450,8 @@ def main() -> None:
                    help="mark for learners not on the sheet or absent every day (default: leave)")
     t.add_argument("--no-skip-all-absent", dest="skip_all_absent", action="store_false",
                    help="also mark students who were absent every day (default: they keep the default mark)")
+    t.add_argument("--date", action="append", metavar="YYYY-MM-DD",
+                   help="only sync this date (repeatable; default: every date column in the sheet)")
     t.add_argument("--dry-run", action="store_true", help="show the plan without changing anything")
     t.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     args = ap.parse_args()

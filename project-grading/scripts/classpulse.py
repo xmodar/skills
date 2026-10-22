@@ -97,9 +97,12 @@ def main():
             if d in days:
                 by_day.setdefault(d, []).append(s["id"])
     held = [d for d in days if d in by_day]
-    present_min = cp.get("present_min", 0.65)
-    late_min = cp.get("late_min", 0.25)
-    joined_late = cp.get("joined_counts_as_late", False)
+    # per-day rules: "day_overrides": {"1,2,3": {"present_min": 0.25, "joined_counts_as_late": true}} (1-based days)
+    over = {}
+    for ks, v in cp.get("day_overrides", {}).items():
+        for k in str(ks).split(","):
+            over[days[int(k) - 1]] = v
+    rule = lambda d, k, default: over.get(d, {}).get(k, cp.get(k, default))
     no_late = {days[i - 1] for i in cp.get("no_late_days", [])}
     nb = cp.get("new_batch") or {}
     nb_day = days[nb["admitted_day"] - 1] if nb.get("admitted_day") else None
@@ -174,6 +177,8 @@ def main():
                 p["days"][d] = {"answered": answered, "total": totals[d], "admitted": any(e["status"] == "admitted" for e in es)}
         new_batch = bool(nb_day) and not any(d in p["days"] for d in held if d < nb_day) and nb_day in p["days"]
         for d in held:
+            present_min, late_min = rule(d, "present_min", 0.65), rule(d, "late_min", 0.25)
+            joined_late = rule(d, "joined_counts_as_late", False)
             x = p["days"].get(d)
             r = x["answered"] / x["total"] if x and x["total"] else 0
             if x and r >= present_min:

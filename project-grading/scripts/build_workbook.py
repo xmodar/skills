@@ -183,14 +183,16 @@ def main():
     # ---- chats (attendance source "chat")
     status, seen, chats, unmapped, windows_log = {}, {}, [], {}, []
     cp_notes, cp_unmatched = [], []
-    for di, ds in enumerate(days if source == "chat" else []):
+    chat_days = []                                       # days whose marks came from a chat export
+
+    def chat_day(di, ds, status, seen):
+        """Mark one day from chat-<ds>.xlsx into status/seen; returns the rows, or None if there is no export."""
         f = os.path.join(D, f"chat-{ds}.xlsx")
         if not os.path.exists(f):
-            chats.append(None)
-            continue
+            return None
+        chat_days.append(di)
         ws = openpyxl.load_workbook(f).active
         rows = [r[:3] for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]]
-        chats.append(rows)
         calls = [P(r[0]) for r in rows if r[1] in instr and kw in str(r[2])]
         wins = [(t - dt.timedelta(minutes=before), t + dt.timedelta(minutes=after)) for t in calls]
         for s, e in extra_windows.get(str(di + 1), []):
@@ -210,14 +212,20 @@ def main():
             inw = any(s <= t <= e for s, e in wins)
             cur = status.setdefault(k, {}).get(di)
             status[k][di] = "Present" if (inw or cur == "Present" or di in lenient) else "Late"
+        return rows
 
-    # lenient days: a submitted project link also counts as Present
-    for g in grades:
-        k = resolve(g.get("student"))
-        if k and g.get("link") and g.get("submitted_day"):
-            di = int(g["submitted_day"]) - 1
-            if di in lenient:
-                status.setdefault(k, {})[di] = "Present"
+    def lenient_links(status):
+        # lenient days: a submitted project link also counts as Present
+        for g in grades:
+            k = resolve(g.get("student"))
+            if k and g.get("link") and g.get("submitted_day"):
+                di = int(g["submitted_day"]) - 1
+                if di in lenient:
+                    status.setdefault(k, {})[di] = "Present"
+
+    for di, ds in enumerate(days if source == "chat" else []):
+        chats.append(chat_day(di, ds, status, seen))
+    lenient_links(status)
 
     if source == "classpulse":                           # ---- ClassPulse checkpoints (see classpulse.py)
         cp = load(cp_path)
@@ -225,6 +233,17 @@ def main():
             sys.exit("attendance_source is classpulse but classpulse_marks.json is missing — run classpulse.py first")
         default = "Leave" if cpc.get("leave_if_never_present") else "Absent"
         chats, status, seen, cp_notes, cp_unmatched = from_classpulse(cp, days, people, roster, aliases, resolve, default)
+        # days with no ClassPulse session fall back to that day's Webex chat export, if there is one
+        for di, ds in enumerate(days):
+            if chats[di] is None:
+                chats[di] = chat_day(di, ds, status, seen)
+        lenient_links(status)
+        if cpc.get("leave_if_never_present"):            # never Present/Late on any day → Leave on chat days too
+            for k, _, _ in people:
+                st = status.setdefault(k, {})
+                if not any(m in ("Present", "Late") for m in st.values()):
+                    for di in chat_days:
+                        st[di] = "Leave"
         instr = instr | {"Trainer"}
         print(f"classpulse: {cp['source']} | checkpoints {cp['totals']} | {len(cp['people'])} people"
               f" | matched {len(cp['people']) - len(cp_unmatched)} | not on roster {len(cp_unmatched)}"
@@ -235,7 +254,19 @@ def main():
             for p in cp_unmatched:
                 cand = difflib.get_close_matches(norm(p["name"]), [norm(n) for n in names], n=3, cutoff=0.4)
                 print(f"  {p['name']!r} ids={p['rosterIds']} days={ {d: v['answered'] for d, v in p['days'].items()} } candidates: {cand}")
-    else:
+    # instructor overrides: course.json "status_overrides": {"<email>": {"<day number>": "Late", ...}}
+    overrides_log = []
+    for who, dm in (cfg.get("status_overrides") or {}).items():
+        k = resolve(who)
+        if not k:
+            sys.exit(f"status_overrides: cannot resolve {who!r}")
+        for dn, mark in dm.items():
+            di = int(dn) - 1
+            overrides_log.append(f"{who} on {days[di]}: {status.get(k, {}).get(di, '-')} -> {mark}")
+            status.setdefault(k, {})[di] = mark
+    if overrides_log:
+        print("status overrides:", "; ".join(overrides_log))
+    if windows_log:
         print("chats:", "; ".join(f"{ds} {n} msgs, calls {','.join(calls) or 'NONE'}" for ds, calls, n in windows_log))
     missing = [days[d] for d in range(ndays) if chats[d] is None]
     if missing:
@@ -300,8 +331,12 @@ def main():
     HR = len(info) + 2                                   # table header row (one blank row after the info block)
     header(c, HR, ["الإسم ثلاثي", "الإيميل", "الحضور", "المشروع", "المجموع", "نوع الشهادة", "رابط المشروع"])
     min_att = cfg.get("certificate_min_attendance_points", 1)  # (2P+L) points needed to be listed
+    def total(k):                                        # المجموع as the sheet computes it: 70% project + 30% attendance
+        return 0.7 * max(pscore(k), 0) / 100 + 0.3 * ascore(k) / (2 * ndays)
+
+    cert_order = sorted(order, key=lambda j: -total(people[j][0]))   # stable: ties keep attendance/project/roster order
     r = HR + 1
-    for j in order:
+    for j in cert_order:
         k, n, e = people[j]
         if ascore(k) < min_att or (source == "classpulse" and not e):   # ClassPulse: AthkaX learners only
             continue
@@ -310,12 +345,12 @@ def main():
         body(c, r, 3, f"=IFERROR(INDEX(Attendance!${L(att_col)}:${L(att_col)},MATCH(A{r},Attendance!$A:$A,0)),0)", align=CENTER, fmt="0%")
         body(c, r, 4, f"=IFERROR(INDEX(Projects!${L(proj_col)}:${L(proj_col)},MATCH(A{r},Projects!$A:$A,0)),0)", align=CENTER, fmt="0%")
         body(c, r, 5, f"=70%*D{r}+30%*C{r}", align=CENTER, fmt="0%", font=BOLD_FONT)
-        body(c, r, 6, f'=IF(AND(E{r}>65%,C{r}>65%),"إجتياز",IF(C{r}>65%,"حضور","بدون"))', align=CENTER, font=BOLD_FONT)
+        body(c, r, 6, f'=IF(AND(E{r}>65%,C{r}>65%),"اجتياز",IF(C{r}>65%,"حضور","بدون"))', align=CENTER, font=BOLD_FONT)
         body(c, r, 7, f'=IFERROR(INDEX(Projects!$C:$C,MATCH(A{r},Projects!$A:$A,0)),"")')
         r += 1
     listed = r - HR - 1
     last_c = max(r - 1, HR + 1)
-    for v, col in (("إجتياز", "C6E0B4"), ("حضور", "FFE699"), ("بدون", "F8CBAD")):
+    for v, col in (("اجتياز", "C6E0B4"), ("حضور", "FFE699"), ("بدون", "F8CBAD")):
         c.conditional_formatting.add(f"F{HR + 1}:F{last_c}", FormulaRule(formula=[f'F{HR + 1}="{v}"'], fill=PatternFill("solid", fgColor=col)))
     note = c.cell(r + 1, 1, cfg.get("certificates_footnote", "تتضمن القائمة كل من سُجّل حضوره في يوم واحد على الأقل."))
     note.font = Font(name=FONT, size=10, italic=True, color="595959")
@@ -326,7 +361,7 @@ def main():
 
     # ---- Attendance
     at = wb.create_sheet("Attendance")
-    header(at, 1, ["Name", "Email", "ClassPulse Name" if source == "classpulse" else "Chat Name"] + list(days) + ["Attendance"])
+    header(at, 1, ["Name", "Email", ("ClassPulse / Chat Name" if chat_days else "ClassPulse Name") if source == "classpulse" else "Chat Name"] + list(days) + ["Attendance"])
     lastday = L(3 + ndays)
     for r, j in enumerate(order, 2):
         k, n, e = people[j]
@@ -421,6 +456,11 @@ def main():
                   if cpc.get("joined_counts_as_late") else "") + "Absent = did not join that day.",
                  "Leave = not Present on any session day, including AthkaX learners never seen in ClassPulse (all session days)."
                  if cpc.get("leave_if_never_present") else "AthkaX learners never seen in ClassPulse are Absent."]
+        for ks, v in cpc.get("day_overrides", {}).items():
+            ds_ = ", ".join(days[int(k) - 1] for k in str(ks).split(","))
+            notes.append(f"Rules on {ds_}: Present = answered at least {v.get('present_min', pm):.0%}"
+                         + ("; any attempt to join counts as Late" if v.get("joined_counts_as_late") else "")
+                         + (f"; Late = answered at least {v['late_min']:.0%}" if "late_min" in v else "") + ".")
         if cpc.get("no_late_days"):
             notes.append("No-Late day(s): " + ", ".join(days[i - 1] for i in cpc["no_late_days"]) + " — Late counts as Present.")
         if nb.get("admitted_day"):
@@ -438,14 +478,19 @@ def main():
         notes += cp_notes
         notes += [f"{p['name']} [{', '.join(p['rosterIds']) or 'no ID'}]: in ClassPulse but not on the AthkaX batch; no email, not synced, no certificate — check registration."
                   for p in cp_unmatched]
+        if chat_days:
+            notes.append("No ClassPulse session on " + ", ".join(days[d] for d in chat_days)
+                         + ": attendance taken from the Webex chat export (sheet of that date lists the chat).")
     else:
         notes = [f"Present = the student posted any message from {before} minute(s) before through {after} minutes after any instructor message containing the word {kw}.",
                  "Late = the student posted at least one message during the day but did not post inside any attendance window.",
                  "Absent = the student posted no message during the day."]
     notes += [f"Attendance = (2 × Present + Late) / (2 × Days), so Present counts as a full day and Late as half a day across {ndays} days.",
-              "Project = min(100, rubric criteria + bonus) / 100. المجموع = 70% × Project + 30% × Attendance; إجتياز needs المجموع > 65% and Attendance > 65%.",
-              "Rows are sorted by Attendance descending, then Project descending; ties retain the official roster order."]
-    if source == "chat":
+              "Project = min(100, rubric criteria + bonus) / 100. المجموع = 70% × Project + 30% × Attendance; اجتياز needs المجموع > 65% and Attendance > 65%.",
+              "Certificates rows are sorted by المجموع descending; Attendance and Projects rows by Attendance descending, then Project descending; ties retain the official roster order."]
+    if overrides_log:
+        notes.append("Instructor attendance overrides: " + "; ".join(overrides_log) + ".")
+    if source == "chat" or chat_days:
         notes.append("Chat display-name aliases were matched to official roster entries; all non-instructor chat users were mapped before export.")
     if lenient:
         notes.append("Lenient day(s) by instructor decision: " + ", ".join(days[d] for d in sorted(lenient)) +
