@@ -51,6 +51,7 @@
    "mark_admitted_day": null
   },
   "leave_if_never_present": true,
+  "leave_if_joined_days_lte": null,
   "aliases": {},
   "exclude": []
  },

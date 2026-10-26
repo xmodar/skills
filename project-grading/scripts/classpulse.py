@@ -198,6 +198,13 @@ def main():
             for d in held:
                 p["why"][d] += f"; {p['marks'][d]} → Leave (never Present)"
                 p["marks"][d] = "Leave"
+        # leave_if_joined_days_lte: N → people who joined ClassPulse on at most N days get Leave on every held day
+        # (0 = only those never seen; the instructor raises it at program end, e.g. 1 = "joined one day only → Leave everywhere")
+        lte = cp.get("leave_if_joined_days_lte")
+        if lte is not None and held and len(p["days"]) <= int(lte):
+            for d in held:
+                p["why"][d] += f"; joined {len(p['days'])} day(s) → Leave"
+                p["marks"][d] = "Leave"
         people.append(p)
 
     out = {"source": os.path.basename(backup), "days": held, "totals": totals, "people": people, "logs": logs}

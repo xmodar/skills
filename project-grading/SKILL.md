@@ -52,7 +52,7 @@ For Modar's courses. Inputs: an AthkaX program link (`https://athkax.sdaia.gov.s
 
 **Projects**: Name | Email | Link | Commit | Use case | criteria | bonus | link check (presentation file) | Project % = min(100, sum + bonus) / 100 | Reasoning.
 
-**One sheet per date** `YYYY-MM-DD`: time | user | text (ClassPulse days: the checkpoint log, trainer rows bold). **Notes**: the rules and every judgment call (lenient days, overrides, adjustments). **Styling**: Arial, blue headers, borders, zebra rows, status colours, frozen headers, filters, ISO dates.
+**One sheet per date** `YYYY-MM-DD`: time | user | text (ClassPulse days: the checkpoint log, interleaved by time with that day's `chat-<date>.xlsx` when one exists, trainer rows bold). The user column always shows the **official roster name**: chat and ClassPulse display names are mapped through `aliases.json` / `extras.json`. **Notes**: the rules and every judgment call (lenient days, overrides, adjustments). **Styling**: Arial, blue headers, borders, zebra rows, status colours, frozen headers, filters, ISO dates.
 
 ## Attendance rules
 **Chat days**
@@ -64,9 +64,9 @@ For Modar's courses. Inputs: an AthkaX program link (`https://athkax.sdaia.gov.s
 **ClassPulse days** (`course.json` → `classpulse`; defaults in brackets)
 - Day total = checkpoints with at least one answer; a person's score = unique checkpoints answered across merged identities.
 - Present ≥ `present_min` [0.65]; Late ≥ `late_min` [0.25], or with `joined_counts_as_late` anyone who opened the link; Absent: did not join.
-- `no_late_days`, `new_batch` {`admitted_day`, `mark_before`, `mark_admitted_day`}, `leave_if_never_present` (never Present anywhere → Leave on every day, chat days included).
+- `no_late_days`, `new_batch` {`admitted_day`, `mark_before`, `mark_admitted_day`}, `leave_if_never_present` (never Present anywhere → Leave on every day, chat days included), `leave_if_joined_days_lte` (N: anyone who joined ClassPulse on at most N days gets Leave on every day; 0 = only learners never seen, days not joined stay Absent. For the rule "joined one day only → Leave everywhere, judged at the end" keep 0 during the course and set 1 on the last day; sync with `--no-skip-all-absent`).
 - Identities merge on participant id, roster ID or normalised name; `classpulse.aliases` for cross-script duplicates; `exclude` co-trainers. Matching to AthkaX: `aliases.json` → Nafath ID → email → exact name.
-- **Hybrid**: a day with no ClassPulse session falls back to that day's chat export automatically.
+- **Hybrid**: a day with no ClassPulse session falls back to that day's chat export automatically. On ClassPulse days the chat export only feeds the date sheet (never the marks); its unmapped names are listed by the build and shown as typed, so map them too (chat names are usually Latin transliterations of the Arabic roster names — resolve by hand, only unambiguous ones).
 - Lenient settings used once (Productivity, Oct 2026): `present_min` 0.25, `joined_counts_as_late`, new batch Late before / Present on day 2, `leave_if_never_present`, day 5 = lenient chat day.
 
 **Instructor overrides**: `status_overrides` `{"<email>": {"<day number>": "Late"}}` (e.g. an excused absence: the link reached her late). Listed in Notes. Then sync that date too.

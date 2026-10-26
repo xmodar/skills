@@ -184,6 +184,7 @@ def main():
     status, seen, chats, unmapped, windows_log = {}, {}, [], {}, []
     cp_notes, cp_unmatched = [], []
     chat_days = []                                       # days whose marks came from a chat export
+    chat_merged, chat_unmapped = [], {}                  # ClassPulse days whose chat export is shown in the date sheet
 
     def chat_day(di, ds, status, seen):
         """Mark one day from chat-<ds>.xlsx into status/seen; returns the rows, or None if there is no export."""
@@ -231,13 +232,37 @@ def main():
         cp = load(cp_path)
         if not cp:
             sys.exit("attendance_source is classpulse but classpulse_marks.json is missing — run classpulse.py first")
-        default = "Leave" if cpc.get("leave_if_never_present") else "Absent"
+        # learners never seen in ClassPulse: Leave under leave_if_never_present or leave_if_joined_days_lte (0 joined days), else Absent
+        default = "Leave" if cpc.get("leave_if_never_present") or cpc.get("leave_if_joined_days_lte") is not None else "Absent"
         chats, status, seen, cp_notes, cp_unmatched = from_classpulse(cp, days, people, roster, aliases, resolve, default)
         # days with no ClassPulse session fall back to that day's Webex chat export, if there is one
         for di, ds in enumerate(days):
             if chats[di] is None:
                 chats[di] = chat_day(di, ds, status, seen)
         lenient_links(status)
+        # ClassPulse days: show the official roster name on checkpoint rows and interleave that day's Webex chat export
+        # (if any) by time. Chat on these days never affects marks; unmapped chat names are reported, shown as typed.
+        name_of = {k: n for k, n, _ in people}
+        cp_key = {norm(n): k for k, ns in seen.items() for n in ns}
+        for di, ds in enumerate(days):
+            if chats[di] is None or di in chat_days:
+                continue
+            rows = [(ts, u if u in instr | {"Trainer"} else name_of.get(cp_key.get(norm(u)), u), x) for ts, u, x in chats[di]]
+            f = os.path.join(D, f"chat-{ds}.xlsx")
+            if os.path.exists(f):
+                chat_merged.append(ds)
+                ws = openpyxl.load_workbook(f).active
+                for ts, u, x in (r[:3] for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]):
+                    k = None if u in instr else who(u)
+                    if u not in instr and not k:
+                        chat_unmapped.setdefault(u, set()).add(ds)
+                    elif k:
+                        seen.setdefault(k, [])
+                        if u not in seen[k]:
+                            seen[k].append(u)
+                    rows.append((str(ts)[:16], name_of[k] if k else u, x))
+            rows.sort(key=lambda r: str(r[0])[:16])
+            chats[di] = rows
         if cpc.get("leave_if_never_present"):            # never Present/Late on any day → Leave on chat days too
             for k, _, _ in people:
                 st = status.setdefault(k, {})
@@ -271,6 +296,10 @@ def main():
     missing = [days[d] for d in range(ndays) if chats[d] is None]
     if missing:
         print(f"no {'ClassPulse session' if source == 'classpulse' else 'chat export'} yet:", ", ".join(missing))
+    if chat_unmapped:
+        print("\nChat names on ClassPulse days not on the roster (shown as typed; add to aliases.json or extras.json):")
+        for u, ds in chat_unmapped.items():
+            print(f"  {u!r} on {', '.join(sorted(ds))}")
     if unmapped:
         print("\nUNMAPPED chat users (add to aliases.json or extras.json):")
         names = [n for _, n, _ in people if n]
@@ -361,7 +390,7 @@ def main():
 
     # ---- Attendance
     at = wb.create_sheet("Attendance")
-    header(at, 1, ["Name", "Email", ("ClassPulse / Chat Name" if chat_days else "ClassPulse Name") if source == "classpulse" else "Chat Name"] + list(days) + ["Attendance"])
+    header(at, 1, ["Name", "Email", ("ClassPulse / Chat Name" if chat_days or chat_merged else "ClassPulse Name") if source == "classpulse" else "Chat Name"] + list(days) + ["Attendance"])
     lastday = L(3 + ndays)
     for r, j in enumerate(order, 2):
         k, n, e = people[j]
@@ -455,7 +484,9 @@ def main():
                  ("Late also = joined the ClassPulse link that day (admitted, waiting or rejected) without reaching the Present mark. "
                   if cpc.get("joined_counts_as_late") else "") + "Absent = did not join that day.",
                  "Leave = not Present on any session day, including AthkaX learners never seen in ClassPulse (all session days)."
-                 if cpc.get("leave_if_never_present") else "AthkaX learners never seen in ClassPulse are Absent."]
+                 if cpc.get("leave_if_never_present") else
+                 f"Leave on every day = joined ClassPulse on {cpc['leave_if_joined_days_lte']} day(s) or fewer over the whole program (AthkaX learners never seen included)."
+                 if cpc.get("leave_if_joined_days_lte") is not None else "AthkaX learners never seen in ClassPulse are Absent."]
         for ks, v in cpc.get("day_overrides", {}).items():
             ds_ = ", ".join(days[int(k) - 1] for k in str(ks).split(","))
             notes.append(f"Rules on {ds_}: Present = answered at least {v.get('present_min', pm):.0%}"
@@ -468,7 +499,8 @@ def main():
                          + (f", {nb['mark_admitted_day']} on it" if nb.get("mark_admitted_day") else "") + ".")
         notes += ["Duplicate ClassPulse identities (several devices, missing or mistyped ID, Arabic/English name) are merged; each checkpoint counts once.",
                   "Matching to AthkaX: aliases.json, then Nafath ID, then email, then exact name. Names and emails shown are the official AthkaX ones.",
-                  "The date sheets list the ClassPulse checkpoint log (trainer rows in bold) instead of chat messages."]
+                  "The date sheets list the ClassPulse checkpoint log" + (f" interleaved by time with the Webex chat export of {', '.join(chat_merged)}" if chat_merged else "")
+                  + " (trainer rows in bold); the user column shows the official roster name (chat and ClassPulse names mapped via aliases.json)."]
         if cpc.get("aliases"):
             notes.append("Manual ClassPulse links: " + "; ".join(f"{k} = {v}" for k, v in cpc["aliases"].items()) + ".")
         if cpc.get("exclude"):
@@ -478,6 +510,8 @@ def main():
         notes += cp_notes
         notes += [f"{p['name']} [{', '.join(p['rosterIds']) or 'no ID'}]: in ClassPulse but not on the AthkaX batch; no email, not synced, no certificate — check registration."
                   for p in cp_unmatched]
+        notes += [f"Chat name {u!r} ({', '.join(sorted(ds))}) could not be matched to the roster; shown as typed in the date sheet."
+                  for u, ds in chat_unmapped.items()]
         if chat_days:
             notes.append("No ClassPulse session on " + ", ".join(days[d] for d in chat_days)
                          + ": attendance taken from the Webex chat export (sheet of that date lists the chat).")
