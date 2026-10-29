@@ -312,9 +312,33 @@ async def cmd_roster(args) -> None:
 
 
 # ---------------------------------------------------------------- attendance push
+FMT_SECTION = re.compile(r'\[(>=|<=|>|<|=)\s*([\d.]+)\]\s*"([^"]+)"')
+
+
+def mark_of(formula, value, number_format: str) -> str:
+    """A day cell as a mark: text as is; a ClassPulse ratio ("=4/6", or its cached value) through the cell's
+    conditional number format, e.g. [>=0.65]"Present";[>=0.25]"Late";"Absent" (written by build_workbook.py)."""
+    v = value
+    if v is None and isinstance(formula, str) and formula.startswith("="):
+        m = re.fullmatch(r"=\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*", formula)
+        if m and float(m[2]):
+            v = float(m[1]) / float(m[2])
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        ops = {">=": v.__ge__, "<=": v.__le__, ">": v.__gt__, "<": v.__lt__, "=": v.__eq__}
+        for op, thr, label in FMT_SECTION.findall(number_format or ""):
+            if ops[op](float(thr)):
+                return label.strip().lower()
+        rest = re.findall(r'(?:^|;)\s*"([^"]+)"\s*$', number_format or "")
+        if rest:
+            return rest[-1].strip().lower()
+        raise SystemExit(f"Attendance cell {formula or value!r} has no mark format ({number_format!r})")
+    return str(v or "").strip().lower()
+
+
 def read_sheet(path: str) -> tuple[list[dt.date], dict[str, list[str]], str | None]:
     """Return (course dates, {email: [mark per day]}, program slug or None) from the workbook."""
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    wb = openpyxl.load_workbook(path, data_only=True)
+    wf = openpyxl.load_workbook(path)                     # formulas + number formats (ClassPulse ratio cells)
     cert = wb["Certificates"]
     slug = None
     for row in cert.iter_rows(min_row=1, max_row=10, max_col=2, values_only=True):
@@ -337,10 +361,10 @@ def read_sheet(path: str) -> tuple[list[dt.date], dict[str, list[str]], str | No
     if not dates:
         raise SystemExit("No date columns (YYYY-MM-DD) found in the Attendance sheet header")
     sheet = {}
-    for row in rows[1:]:
-        email = (row[1] or "").strip().lower()
+    for vrow, frow in zip(list(wb["Attendance"].iter_rows())[1:], list(wf["Attendance"].iter_rows())[1:]):
+        email = (vrow[1].value or "").strip().lower()
         if email:
-            sheet[email] = [str(row[i] or "").strip().lower() for i in day_cols]
+            sheet[email] = [mark_of(frow[i].value, vrow[i].value, frow[i].number_format) for i in day_cols]
     return dates, sheet, slug
 
 

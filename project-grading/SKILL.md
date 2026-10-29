@@ -53,7 +53,8 @@ For Modar's courses. Inputs: an AthkaX program link (`https://athkax.sdaia.gov.s
 | نوع الشهادة | **اجتياز** (spelled with ا, never إ) if المجموع > 65% and الحضور > 65%; حضور if only الحضور > 65%; otherwise بدون |
 | رابط المشروع | project link |
 
-**Attendance**: Name | Email | Chat Name (ClassPulse / Chat Name) | one column per date (`YYYY-MM-DD`) | Attendance = (2×Present + Late) / (2×Days). Marks: Present / Late / Absent / Leave; days not held yet stay blank. Sorted by attendance, then project.
+**Attendance**: Name | Email | Chat Name (ClassPulse / Chat Name) | one column per date (`YYYY-MM-DD`) | Attendance = (2×Present + Late) / (2×Days). Marks: Present / Late / Absent / Leave; days not held yet stay blank. **Rows sorted by total attendance descending** (then project, then roster order); **Certificates sorted by المجموع descending**.
+- **ClassPulse day cells are formulas**: a learner who joined gets `=answered/total` (e.g. `=4/6`) with the number format `[>=present_min]"Present";[>=late_min]"Late";"Absent"`, so the cell shows the mark and keeps the evidence; conditional fills (green/yellow/red/grey) follow the same thresholds for numbers and text. Text marks remain for overrides, Leave, days not joined (Absent) and chat days. The Attendance total formula counts both (`COUNTIF "Present"` + `COUNTIF ">=present_min"`, Late likewise). `athkax.py` and `score_table.py` evaluate the ratio through the cell's own number format (openpyxl-written formulas have no cached value), so the thresholds live in the workbook.
 
 **Projects**: Name | Email | Link | Commit | Use case | criteria | bonus | link check (presentation file) | Project % = min(100, sum + bonus) / 100 | Reasoning.
 
@@ -76,6 +77,8 @@ For Modar's courses. Inputs: an AthkaX program link (`https://athkax.sdaia.gov.s
 - Identities merge on participant id, roster ID or normalised name; `classpulse.aliases` for cross-script duplicates; `exclude` co-trainers. Matching to AthkaX: `aliases.json` → Nafath ID → email → exact name.
 - **Hybrid**: a day with no ClassPulse session falls back to that day's chat export automatically. On ClassPulse days the chat export only feeds the date sheet (never the marks); its unmapped names are listed by the build and shown as typed, so map them too (chat names are usually Latin transliterations of the Arabic roster names — resolve by hand, only unambiguous ones).
 - Lenient settings used once (Productivity, Oct 2026): `present_min` 0.25, `joined_counts_as_late`, new batch Late before / Present on day 2, `leave_if_never_present`, day 5 = lenient chat day.
+- Lenient settings used once (Agentic AI, Oct 2026, decided on the last day): `present_min` 0.40, `late_min` 0.0001 (= at least one checkpoint answered; chat credit counts), day 5 = lenient chat day. Defaults stay 0.65 / 0.25; change them only when he asks, then rerun classpulse.py, rebuild and sync **all** dates.
+- **End-of-program Leave rule** (course.json `leave_if_attended_days_lte`, set to 1 on the last day, applied by build_workbook.py): anyone who joined on at most N days over the whole program — a ClassPulse day joined (even with no answer) or a chat day with a message — is Leave on every held day, chat days included; overrides still win. Keep `classpulse.leave_if_joined_days_lte` at 0 (never-seen learners Leave on ClassPulse days during the course). The build prints how many joined-once learners became Leave; sync all dates afterwards.
 
 **Instructor overrides**: `status_overrides` `{"<email>": {"<day number>": "Late"}}` (e.g. an excused absence: the link reached her late; "ClassPulse would not admit me until you fixed it" → Present that day). Listed in Notes. Then sync that date too.
 
@@ -141,7 +144,7 @@ Each "check the chat / updates" round ("updated the chat", "check updates"), usu
   | 21 | Ziyad … | 46 | 5 | evals.py, tasks.jsonl (≥15), A/B CSVs, error analysis counts, real MCP server |
   | 24 | غاليه … | 66 | — | attendance 50% |
 
-  `remaining` = 0 when the certificate is اجتياز; otherwise the project points still needed to pass; "—" when attendance ≤ 65% (no project can pass). `notes` = short keyword list of what would get them to pass (the grader's `missing`), empty when passing. The first round shows the full table; later rounds show **only new or changed rows** plus "everyone else unchanged" and the pass count (e.g. "30 of 37 reach اجتياز").
+  `remaining` = 0 when the certificate is اجتياز; otherwise the project points still needed to pass; "—" when attendance ≤ 65% (no project can pass). `notes` = short keyword list of what would get them to pass (the grader's `missing`), empty when passing. The first round shows the full table; later rounds show **only the deltas** (new or changed rows; keep the previous `t.md` and `diff` it) plus "everyone else unchanged" and the pass count (e.g. "30 of 37 reach اجتياز"). Post the full table only when he asks.
 - Under the table, 3–5 bullets: attendance claims and their effect, links that aren't repos / private / team, unanswered questions from the chat, and anything that needs his decision. Remind him which dates changed and need syncing.
 - "Who can still pass?": everyone with حضور — needed project > (65% − 0.3 × attendance) / 0.7 (100% attendance → 50%, 90% → 54.3%, 80% → 58.6%, 70% → 62.9%). At ≤ 50% attendance nobody can pass. A student absent today who posts anything on a lenient day gains attendance.
 

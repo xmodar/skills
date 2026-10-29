@@ -15,7 +15,7 @@ whatif: recomputes ClassPulse days from each learner's answered/total checkpoint
   thresholds (chat days and status_overrides kept) and lists everyone whose marks change, with attendance and
   certificate before → after; certificate changes first. Nothing is written to the workbook.
 """
-import argparse, json, math, os
+import argparse, json, math, os, re
 import openpyxl
 
 
@@ -41,14 +41,33 @@ def projects(D, G):
     return best
 
 
+SECTION = re.compile(r'\[(>=|<=|>|<|=)\s*([\d.]+)\]\s*"([^"]+)"')
+
+
+def mark(cell):
+    """Text mark, or a ClassPulse ratio formula ("=4/6") read through its conditional number format."""
+    v = cell.value
+    m = re.fullmatch(r"=\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*", v) if isinstance(v, str) else None
+    if m:
+        v = float(m[1]) / float(m[2])
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        ops = {">=": v.__ge__, "<=": v.__le__, ">": v.__gt__, "<": v.__lt__, "=": v.__eq__}
+        for op, thr, label in SECTION.findall(cell.number_format or ""):
+            if ops[op](float(thr)):
+                return label
+        rest = re.findall(r'(?:^|;)\s*"([^"]+)"\s*$', cell.number_format or "")
+        return rest[-1] if rest else None
+    return v
+
+
 def attendance(xl):
     ws = openpyxl.load_workbook(xl)["Attendance"]
     h = [c.value for c in ws[1]]
     days = [x for x in h if str(x)[:2] == "20"]
     rows = {}
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        if r[1]:
-            rows[str(r[1]).lower()] = (r[0], [r[h.index(d)] for d in days])
+    for r in ws.iter_rows(min_row=2):
+        if r[1].value:
+            rows[str(r[1].value).lower()] = (r[0].value, [mark(r[h.index(d)]) for d in days])
     return days, rows
 
 

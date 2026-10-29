@@ -88,13 +88,14 @@ def body(ws, r, c, value=None, *, align=TOP, fill=None, font=None, fmt=None, zeb
 def from_classpulse(cp, days, people, roster, aliases, resolve, default_mark):
     """Map classpulse_marks.json people to roster keys: alias → Nafath ID → email → name; the rest become +CPn extras.
 
-    Returns (chats-like day logs, status, seen names, notes, unmatched people). Two ClassPulse identities that resolve
-    to one learner keep the better mark per day; roster learners never seen in ClassPulse get `default_mark`."""
+    Returns (chats-like day logs, status, seen names, notes, unmatched people, ratios). Two ClassPulse identities that
+    resolve to one learner keep the better mark per day; roster learners never seen in ClassPulse get `default_mark`.
+    ratios = {key: {day index: (answered, total)}} for every day the learner joined ClassPulse (the best identity)."""
     digits = lambda s: re.sub(r"\D", "", str(s or ""))
     by_naf = {digits(s.get("nafath")): "#%d" % i for i, s in enumerate(roster) if digits(s.get("nafath"))}
     by_email = {(e or "").strip().lower(): k for k, _, e in people if e}
     by_name = {norm(n): k for k, n, _ in people if n}
-    status, seen, notes, unmatched = {}, {}, [], []
+    status, seen, notes, unmatched, ratios = {}, {}, [], [], {}
     for p in cp["people"]:
         k = next((resolve(aliases[n]) for n in p["names"] if n in aliases), None)
         k = k or next((by_naf[digits(r)] for r in p["rosterIds"] if "@" not in r and digits(r) in by_naf), None)
@@ -115,13 +116,19 @@ def from_classpulse(cp, days, people, roster, aliases, resolve, default_mark):
                     cur[di] = m
         seen.setdefault(k, [])
         seen[k] += [n for n in p["names"] if n not in seen[k]]
+        for d, x in (p.get("days") or {}).items():
+            if d in days and x.get("total"):
+                rk = ratios.setdefault(k, {})
+                di = days.index(d)
+                if di not in rk or x["answered"] / x["total"] > rk[di][0] / rk[di][1]:
+                    rk[di] = (x["answered"], x["total"])
     held = set(cp["days"])
     for k, _, _ in people:
         if k not in status:
             status[k] = {days.index(d): default_mark for d in held if d in days}
     chats = [[(f"{ds} {t}", "Trainer" if tr else u, x) for t, u, x, tr in cp["logs"][ds]] if ds in held else None
              for ds in days]
-    return chats, status, seen, notes, unmatched
+    return chats, status, seen, notes, unmatched, ratios
 
 
 def main():
@@ -182,6 +189,7 @@ def main():
 
     # ---- chats (attendance source "chat")
     status, seen, chats, unmapped, windows_log = {}, {}, [], {}, []
+    ratios = {}                                          # ClassPulse: {key: {day: (answered, total)}} (days joined)
     cp_notes, cp_unmatched = [], []
     chat_days = []                                       # days whose marks came from a chat export
     chat_merged, chat_unmapped = [], {}                  # ClassPulse days whose chat export is shown in the date sheet
@@ -234,7 +242,7 @@ def main():
             sys.exit("attendance_source is classpulse but classpulse_marks.json is missing — run classpulse.py first")
         # learners never seen in ClassPulse: Leave under leave_if_never_present or leave_if_joined_days_lte (0 joined days), else Absent
         default = "Leave" if cpc.get("leave_if_never_present") or cpc.get("leave_if_joined_days_lte") is not None else "Absent"
-        chats, status, seen, cp_notes, cp_unmatched = from_classpulse(cp, days, people, roster, aliases, resolve, default)
+        chats, status, seen, cp_notes, cp_unmatched, ratios = from_classpulse(cp, days, people, roster, aliases, resolve, default)
         # days with no ClassPulse session fall back to that day's Webex chat export, if there is one
         for di, ds in enumerate(days):
             if chats[di] is None:
@@ -279,6 +287,21 @@ def main():
             for p in cp_unmatched:
                 cand = difflib.get_close_matches(norm(p["name"]), [norm(n) for n in names], n=3, cutoff=0.4)
                 print(f"  {p['name']!r} ids={p['rosterIds']} days={ {d: v['answered'] for d, v in p['days'].items()} } candidates: {cand}")
+    # end-of-program rule (course.json "leave_if_attended_days_lte": N, set on the last day): anyone who joined on at most
+    # N days — a ClassPulse day joined (even with no answer) or a chat day with a message — is Leave on every held day.
+    end_leave = cfg.get("leave_if_attended_days_lte")
+    end_leave_names = []
+    if end_leave is not None:
+        held_days = [d for d in range(ndays) if chats[d] is not None]
+        for k, n, _ in people:
+            st = status.setdefault(k, {})
+            joined = {d for d in ratios.get(k, {})} | {d for d in chat_days if st.get(d) in ("Present", "Late")}
+            if len(joined) <= int(end_leave) and any(st.get(d) != "Leave" for d in held_days):
+                for d in held_days:
+                    st[d] = "Leave"
+                if joined:
+                    end_leave_names.append(n)
+        print(f"end-of-program Leave (joined <= {end_leave} day(s)): {len(end_leave_names)} learners who joined, plus those never seen")
     # instructor overrides: course.json "status_overrides": {"<email>": {"<day number>": "Late", ...}}
     overrides_log = []
     for who, dm in (cfg.get("status_overrides") or {}).items():
@@ -392,6 +415,13 @@ def main():
     at = wb.create_sheet("Attendance")
     header(at, 1, ["Name", "Email", ("ClassPulse / Chat Name" if chat_days or chat_merged else "ClassPulse Name") if source == "classpulse" else "Chat Name"] + list(days) + ["Attendance"])
     lastday = L(3 + ndays)
+    # ClassPulse days: a learner who joined gets the checkpoint ratio as a formula ("=4/6") whose number format shows
+    # the mark — Present ≥ present_min, Late ≥ late_min, else Absent — when that matches the computed mark (not an
+    # override, Leave or a special rule); everything else is text. Totals and fills read both forms.
+    pmin, lmin = cpc.get("present_min", 0.65), cpc.get("late_min", 0.25)
+    ratio_fmt = f'[>={pmin:g}]"Present";[>={lmin:g}]"Late";"Absent"'
+    as_mark = lambda a, t: "Present" if a / t >= pmin else "Late" if a / t >= lmin else "Absent"
+    n_formula = 0
     for r, j in enumerate(order, 2):
         k, n, e = people[j]
         body(at, r, 1, n)
@@ -399,12 +429,23 @@ def main():
         body(at, r, 3, ", ".join(seen.get(k, [])) or None)
         for d in range(ndays):
             v = status.get(k, {}).get(d, "Absent") if chats[d] is not None else None
-            body(at, r, 4 + d, v, align=CENTER, fill=FILL.get(v), zebra=v is None)
-        body(at, r, att_col, f'=(2*COUNTIF(D{r}:{lastday}{r},"Present")+COUNTIF(D{r}:{lastday}{r},"Late"))/{2 * ndays}',
+            q = ratios.get(k, {}).get(d)
+            if v and q and d not in chat_days and as_mark(*q) == v:
+                body(at, r, 4 + d, f"={q[0]}/{q[1]}", align=CENTER, fmt=ratio_fmt, zebra=False)
+                n_formula += 1
+            else:
+                body(at, r, 4 + d, v, align=CENTER, fill=FILL.get(v), zebra=v is None)
+        rng = f"D{r}:{lastday}{r}"
+        body(at, r, att_col, f'=(2*(COUNTIF({rng},"Present")+COUNTIF({rng},">={pmin:g}"))+COUNTIF({rng},"Late")'
+                             f'+COUNTIFS({rng},">={lmin:g}",{rng},"<{pmin:g}"))/{2 * ndays}',
              align=CENTER, fmt="0%", fill=KEY, font=BOLD_FONT)
     last = len(order) + 1
+    rules = {"Present": f'OR(D2="Present",AND(ISNUMBER(D2),D2>={pmin:g}))',
+             "Late": f'OR(D2="Late",AND(ISNUMBER(D2),D2>={lmin:g},D2<{pmin:g}))',
+             "Absent": f'OR(D2="Absent",AND(ISNUMBER(D2),D2<{lmin:g}))',
+             "Leave": 'D2="Leave"'}
     for v, f in FILL.items():
-        at.conditional_formatting.add(f"D2:{lastday}{last}", FormulaRule(formula=[f'D2="{v}"'], fill=f))
+        at.conditional_formatting.add(f"D2:{lastday}{last}", FormulaRule(formula=[rules[v]], fill=f))
     for col, w in zip("ABC", [32, 32, 40]):
         at.column_dimensions[col].width = w
     for d in range(ndays):
@@ -525,6 +566,13 @@ def main():
     notes += [f"Attendance = (2 × Present + Late) / (2 × Days), so Present counts as a full day and Late as half a day across {ndays} days.",
               "Project = min(100, rubric criteria + bonus) / 100. المجموع = 70% × Project + 30% × Attendance; اجتياز needs المجموع > 65% and Attendance > 65%.",
               "Certificates rows are sorted by المجموع descending; Attendance and Projects rows by Attendance descending, then Project descending; ties retain the official roster order."]
+    if source == "classpulse":
+        notes.append(f"ClassPulse day cells hold the learner's checkpoint ratio as a formula (e.g. =4/6, answered/total); the cell format "
+                     f"shows Present when it is at least {pmin:.0%}, Late when at least {lmin:.0%} and Absent below, and the colours follow. "
+                     "Text marks are overrides, Leave, days not joined (Absent) and chat days.")
+    if end_leave is not None:
+        notes.append(f"End of program: anyone who joined on {end_leave} day(s) or fewer (ClassPulse joins, or a chat message on a chat day) "
+                     "is Leave on every day" + (f" ({', '.join(end_leave_names)} joined once; everyone else never joined)." if end_leave_names else "."))
     if overrides_log:
         notes.append("Instructor attendance overrides: " + "; ".join(overrides_log) + ".")
     if source == "chat" or chat_days:
