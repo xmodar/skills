@@ -26,6 +26,8 @@ def load(p, d=None):
 def projects(D, G):
     subs, st = load(os.path.join(D, "submissions.json"), {}), load(os.path.join(D, "submissions_state.json"), {})
     bmax = (load(os.path.join(D, "course.json"), {}).get("grading") or {}).get("bonus_max", 10)
+    # grades.json (merge_grades.py) is the source of truth: keep-higher and instructor bonus overrides live there
+    merged = {g["link"]: g for g in load(os.path.join(D, "grades.json"), []) if g.get("scores")}
     best = {}
     for d, x in subs.items():
         v = (st.get(d) or {}).get("version", 1)
@@ -35,6 +37,9 @@ def projects(D, G):
         b = (load(os.path.join(G, f"{d}.v{v}.bonus.json")) or {}).get("bonus", 0)
         letters = [k for k in "ABCDEFGHIJ" if k in g]
         P = min(100, sum(int(g[k]) for k in letters) + min(bmax, max(int(g.get("bonus") or 0), int(b))))
+        if x["link"] in merged:
+            m = merged[x["link"]]
+            P = min(100, sum(m["scores"]) + int(m.get("bonus") or 0))
         e = str(x["student"]).lower()
         if e not in best or P > best[e][0]:
             best[e] = (P, d, x, g)

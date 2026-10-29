@@ -88,6 +88,17 @@ def body(ws, r, c, value=None, *, align=TOP, fill=None, font=None, fmt=None, zeb
     return x
 
 
+def read_chat(path):
+    """A day's chat-<date>.xlsx (chat_day.py output): timestamp | user | text | every other column of the Webex export.
+    Returns (extra column names, rows (timestamp, user, text, "Webex chat", {column: value}))."""
+    it = openpyxl.load_workbook(path).active.iter_rows(values_only=True)
+    head = [str(h) for h in next(it, ())]
+    extra = [h for h in head[3:] if h != "None"]
+    rows = [(r[0], r[1], r[2], "Webex chat", {h: v for h, v in zip(head[3:], r[3:]) if v not in (None, "")})
+            for r in it if r and r[0]]
+    return extra, rows
+
+
 def from_classpulse(cp, days, people, roster, aliases, resolve, default_mark):
     """Map classpulse_marks.json people to roster keys: alias → Nafath ID → email → name; the rest become +CPn extras.
 
@@ -129,7 +140,10 @@ def from_classpulse(cp, days, people, roster, aliases, resolve, default_mark):
     for k, _, _ in people:
         if k not in status:
             status[k] = {days.index(d): default_mark for d in held if d in days}
-    chats = [[(f"{ds} {t}", "Trainer" if tr else u, x) for t, u, x, tr in cp["logs"][ds]] if ds in held else None
+    # log rows: [time, who, text, by trainer, event type, device] (older marks files: the first four only)
+    chats = [[(f"{ds} {l[0]}", "Trainer" if l[3] else l[1], l[2], "ClassPulse",
+               {k: v for k, v in (("event", l[4] if len(l) > 4 else "resp"), ("device", l[5] if len(l) > 5 else None)) if v})
+              for l in cp["logs"][ds]] if ds in held else None
              for ds in days]
     return chats, status, seen, notes, unmatched, ratios
 
@@ -196,6 +210,7 @@ def main():
     cp_notes, cp_unmatched = [], []
     chat_days = []                                       # days whose marks came from a chat export
     chat_merged, chat_unmapped = [], {}                  # ClassPulse days whose chat export is shown in the date sheet
+    chat_cols = {}                                       # date → the chat export's extra columns (reply_to, reactions, ...)
 
     def chat_day(di, ds, status, seen):
         """Mark one day from chat-<ds>.xlsx into status/seen; returns the rows, or None if there is no export."""
@@ -203,14 +218,13 @@ def main():
         if not os.path.exists(f):
             return None
         chat_days.append(di)
-        ws = openpyxl.load_workbook(f).active
-        rows = [r[:3] for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]]
+        chat_cols[ds], rows = read_chat(f)
         calls = [P(r[0]) for r in rows if r[1] in instr and kw in str(r[2])]
         wins = [(t - dt.timedelta(minutes=before), t + dt.timedelta(minutes=after)) for t in calls]
         for s, e in extra_windows.get(str(di + 1), []):
             wins.append((P(f"{ds} {s}"), P(f"{ds} {e}")))
         windows_log.append((ds, [t.strftime("%H:%M") for t in calls], len(rows)))
-        for ts, u, txt in rows:
+        for ts, u, txt, *_ in rows:
             if u in instr:
                 continue
             k = who(u)
@@ -258,12 +272,13 @@ def main():
         for di, ds in enumerate(days):
             if chats[di] is None or di in chat_days:
                 continue
-            rows = [(ts, u if u in instr | {"Trainer"} else name_of.get(cp_key.get(norm(u)), u), x) for ts, u, x in chats[di]]
+            rows = [(ts, u if u in instr | {"Trainer"} else name_of.get(cp_key.get(norm(u)), u), x, *rest)
+                    for ts, u, x, *rest in chats[di]]
             f = os.path.join(D, f"chat-{ds}.xlsx")
             if os.path.exists(f):
                 chat_merged.append(ds)
-                ws = openpyxl.load_workbook(f).active
-                for ts, u, x in (r[:3] for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]):
+                chat_cols[ds], crow = read_chat(f)
+                for ts, u, x, src, ext in crow:
                     k = None if u in instr else who(u)
                     if u not in instr and not k:
                         chat_unmapped.setdefault(u, set()).add(ds)
@@ -271,8 +286,8 @@ def main():
                         seen.setdefault(k, [])
                         if u not in seen[k]:
                             seen[k].append(u)
-                    rows.append((str(ts)[:16], name_of[k] if k else u, x))
-            rows.sort(key=lambda r: str(r[0])[:16])
+                    rows.append((str(ts)[:16], name_of[k] if k else u, x, src, ext))
+            rows.sort(key=lambda r: str(r[0]))
             chats[di] = rows
         if cpc.get("leave_if_never_present"):            # never Present/Late on any day → Leave on chat days too
             for k, _, _ in people:
@@ -389,7 +404,12 @@ def main():
     def total(k):                                        # المجموع as the sheet computes it: 70% project + 30% attendance
         return 0.7 * max(pscore(k), 0) / 100 + 0.3 * ascore(k) / (2 * ndays)
 
-    cert_order = sorted(order, key=lambda j: -total(people[j][0]))   # stable: ties keep attendance/project/roster order
+    def cert_rank(k):                                    # نوع الشهادة as the sheet computes it: اجتياز 0, حضور 1, بدون 2
+        att = ascore(k) / (2 * ndays)
+        return 0 if att > 0.65 and total(k) > 0.65 else 1 if att > 0.65 else 2
+
+    # certificate type first (اجتياز → حضور → بدون), then المجموع descending; stable: ties keep attendance/project/roster order
+    cert_order = sorted(order, key=lambda j: (cert_rank(people[j][0]), -total(people[j][0])))
     r = HR + 1
     for j in cert_order:
         k, n, e = people[j]
@@ -499,22 +519,33 @@ def main():
     p.freeze_panes = "B2"
     p.auto_filter.ref = f"A1:{L(proj_col + 1)}{lastp}"
 
-    # ---- one chat sheet per course date (time only)
+    # ---- one sheet per course date: the full Webex chat export (every column) merged by time with the full ClassPulse
+    # event log (checkpoint open/close, answers, joins, admits, device requests) — time | user | text | source | extras
     for d, rows in enumerate(chats):
         if rows is None:
             continue
         s = wb.create_sheet(days[d])
-        header(s, 1, ["time", "user", "text"])
-        for r, (ts, u, txt) in enumerate(rows, 2):
+        extra = list(chat_cols.get(days[d], []))
+        for *_, ext in (x for x in rows if len(x) > 4):
+            extra += [k for k in ext if k not in extra]
+        header(s, 1, ["time", "user", "text", "source"] + extra)
+        for r, (ts, u, txt, *rest) in enumerate(rows, 2):
+            src, ext = (rest + ["", {}])[:2]
             is_instr = u in instr
             f = Font(name=FONT, size=11, bold=True, color="1F4E78") if is_instr else None
-            body(s, r, 1, str(ts)[11:16], align=CENTER, font=f)
+            body(s, r, 1, str(ts)[11:19], align=CENTER, font=f)
             body(s, r, 2, u, font=f)
             body(s, r, 3, txt, align=WRAP, font=f)
-        for col, w in zip("ABC", [8, 32, 100]):
+            body(s, r, 4, src, font=f)
+            for j, k in enumerate(extra, 5):
+                v = ext.get(k)
+                body(s, r, j, v if v is None or isinstance(v, (int, float)) else str(v), align=WRAP, font=f)
+        for col, w in zip("ABCD", [10, 32, 100, 12]):
             s.column_dimensions[col].width = w
+        for j in range(5, 5 + len(extra)):
+            s.column_dimensions[L(j)].width = 16
         s.freeze_panes = "A2"
-        s.auto_filter.ref = f"A1:C{len(rows) + 1}"
+        s.auto_filter.ref = f"A1:{L(4 + len(extra))}{len(rows) + 1}"
 
     # ---- Notes
     nt = wb.create_sheet("Notes")
@@ -544,7 +575,7 @@ def main():
                          + (f", {nb['mark_admitted_day']} on it" if nb.get("mark_admitted_day") else "") + ".")
         notes += ["Duplicate ClassPulse identities (several devices, missing or mistyped ID, Arabic/English name) are merged; each checkpoint counts once.",
                   "Matching to AthkaX: aliases.json, then Nafath ID, then email, then exact name. Names and emails shown are the official AthkaX ones.",
-                  "The date sheets list the ClassPulse checkpoint log" + (f" interleaved by time with the Webex chat export of {', '.join(chat_merged)}" if chat_merged else "")
+                  "The date sheets list the ClassPulse event log (checkpoints opened/closed, answers, joins, admissions, device requests)" + (f" merged by time with the Webex chat export of {', '.join(chat_merged)} (every exported column; 'source' tells them apart)" if chat_merged else "")
                   + " (trainer rows in bold); the user column shows the official roster name (chat and ClassPulse names mapped via aliases.json)."]
         if cpc.get("chat_checkpoint_credit"):
             notes.append("A Webex chat message posted while a checkpoint was open (from its opening minute to its closing minute) "
@@ -569,7 +600,7 @@ def main():
                  "Absent = the student posted no message during the day."]
     notes += [f"Attendance = (2 × Present + Late) / (2 × Days), so Present counts as a full day and Late as half a day across {ndays} days.",
               "Project = min(100, rubric criteria + bonus) / 100. المجموع = 70% × Project + 30% × Attendance; اجتياز needs المجموع > 65% and Attendance > 65%.",
-              "Certificates rows are sorted by المجموع descending; Attendance and Projects rows by Attendance descending, then Project descending; ties retain the official roster order."]
+              "Certificates rows are sorted by نوع الشهادة (اجتياز, then حضور, then بدون), then المجموع descending; Attendance and Projects rows by Attendance descending, then Project descending; ties retain the official roster order."]
     if source == "classpulse":
         notes.append(f"ClassPulse day cells hold the learner's checkpoint ratio as a formula (e.g. =4/6, answered/total); the cell format "
                      f"shows Present when it is at least {pmin:.0%}, Late when at least {lmin:.0%} and Absent below, and the colours follow. "

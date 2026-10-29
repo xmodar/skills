@@ -141,18 +141,34 @@ def main():
             nxt = next((e["t"] for e in opens if e["t"] > o["t"]), stop)
             wins[d].append((o["id"], minute(o["t"]), minute(close if close is not None else nxt)))
         num = {o["id"]: (i, o) for i, o in enumerate(cps, 1)}
-        hm = lambda ms: local(ms).strftime("%H:%M")
+        hm = lambda ms: local(ms).strftime("%H:%M:%S")
+        # the full event log of the day: [time, who, text, by trainer, event type, device]
         logs[d] = []
+        name = lambda pid: (P.get(pid) or {}).get("name", pid).strip()
         for e in ev:
-            if e["type"] == "cp.open" and e["id"] in num:
-                logs[d].append([hm(e["t"]), "Trainer", f"Checkpoint {num[e['id']][0]} opened ({e.get('adhoc') or e['q'].get('type')})", True])
-            elif e["type"] == "resp" and e["r"]["cp"] in num:
+            t, ty = hm(e["t"]), e["type"]
+            if ty == "cp.open":
+                i = num[e["id"]][0] if e["id"] in num else "(no answers)"
+                logs[d].append([t, "Trainer", f"Checkpoint {i} opened ({e.get('adhoc') or e['q'].get('type')}): "
+                                f"{e['q'].get('text') or e['q'].get('title') or ''}".rstrip(": "), True, ty, None])
+            elif ty == "cp.close":
+                i = num[e["cp"]][0] if e.get("cp") in num else "(no answers)"
+                logs[d].append([t, "Trainer", f"Checkpoint {i} closed", True, ty, None])
+            elif ty == "resp" and e["r"]["cp"] in num:
                 i, o = num[e["r"]["cp"]]
                 opts, ans = o["q"].get("options") or [], e["r"].get("answer")
                 label = opts[ans] if isinstance(ans, int) and 0 <= ans < len(opts) else json.dumps(ans, ensure_ascii=False)
-                who = (P.get(e["r"]["pid"]) or {}).get("name", e["r"]["pid"]).strip()
-                if norm(who) not in exclude:
-                    logs[d].append([hm(e["t"]), who, f"Checkpoint {i}: {label}", False])
+                if norm(name(e["r"]["pid"])) not in exclude:
+                    logs[d].append([t, name(e["r"]["pid"]), f"Checkpoint {i}: {label}", False, ty, e["r"].get("device")])
+            elif ty == "p.join" and norm(e["p"]["name"]) not in exclude:
+                p = e["p"]
+                logs[d].append([t, p["name"].strip(), f"joined (roster ID {p.get('rosterId') or '-'}, "
+                                f"{'mobile' if p.get('mobile') else 'desktop'})", False, ty, ", ".join(p.get("devices") or []) or None])
+            elif ty in ("p.admit", "p.reject", "p.device", "p.deviceRequest") and norm(name(e.get("pid"))) not in exclude:
+                txt = {"p.admit": "admitted by the trainer", "p.reject": "rejected by the trainer",
+                       "p.deviceRequest": "asked to add a device",
+                       "p.device": f"device {'approved' if e.get('approved') else 'refused'} by the trainer"}[ty]
+                logs[d].append([t, name(e.get("pid")), txt, False, ty, e.get("device")])
         for p in P.values():
             if norm(p["name"]) in exclude:
                 continue
