@@ -21,6 +21,7 @@ need (truncate long outputs), compute metrics with pandas one-liners — never d
 ### D. Presentation & reproducibility — <w> ("README lets a stranger reproduce results")
 - setup, data source, commands, pinned deps, sample I/O. HARD RULE: README must link <required link>, else cap D at half.
 ### E. <optional part> bonus — 0 to +<b> (never penalise absence)
+(Separately, every project also gets the lenient bonus review of up to +10 — see SKILL.md; the total bonus is capped at 10 and the score at 100.)
 - 80–100% of b: done with before/after on the same test set.   40–67%: evidence-based case for not doing it, or weak comparison.
 - 7–33%: attempted without comparison, or justification without evidence.   0: none.
 Final = min(100, A+B+C+D+E).
@@ -34,4 +35,5 @@ Final = min(100, A+B+C+D+E).
 ## Output — return ONLY this JSON as the last thing in your reply (no long narrative)
 {"repo": "...", "use_case": "1|2|3|other: ...", "A": int, "B": int, "C": int, "D": int, "E": int, "sdaia_link": true/false,
  "reasoning": "3–6 sentences, concrete numbers/files, what cost points per criterion, bonus basis",
+ "missing": "comma-separated keywords of the concrete things whose addition would raise the score most (feeds the instructor's table)",
  "flags": "short: unbacked claims, leakage, AI-generated disclosure, one-big-commit, missing files, team names"}

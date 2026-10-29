@@ -501,6 +501,9 @@ def main():
                   "Matching to AthkaX: aliases.json, then Nafath ID, then email, then exact name. Names and emails shown are the official AthkaX ones.",
                   "The date sheets list the ClassPulse checkpoint log" + (f" interleaved by time with the Webex chat export of {', '.join(chat_merged)}" if chat_merged else "")
                   + " (trainer rows in bold); the user column shows the official roster name (chat and ClassPulse names mapped via aliases.json)."]
+        if cpc.get("chat_checkpoint_credit"):
+            notes.append("A Webex chat message posted while a checkpoint was open (from its opening minute to its closing minute) "
+                         "counts as answering that checkpoint; chat names are matched to learners through aliases.json.")
         if cpc.get("aliases"):
             notes.append("Manual ClassPulse links: " + "; ".join(f"{k} = {v}" for k, v in cpc["aliases"].items()) + ".")
         if cpc.get("exclude"):

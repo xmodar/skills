@@ -49,8 +49,8 @@ def gh_url(url):
     m = re.match(r"https?://github\.com/([^/\s]+)/([^/\s#?]+)", url)
     if not m:
         return None
-    repo = re.sub(r"\.git$", "", m.group(2)).rstrip(".")
-    return f"https://github.com/{m.group(1)}/{repo}"
+    repo = re.sub(r"\.git$", "", m.group(2))
+    return f"https://github.com/{m.group(1)}/{repo}"  # a trailing "." is tried both ways in _check_one
 
 
 def safe_rmtree(path, root):
@@ -148,13 +148,19 @@ def _check_one(d, sub, state, root):
     safe_rmtree(inc, root)
     if kind == "github":
         repo = gh_url(url)
-        r = subprocess.run(["git", "ls-remote", repo, "HEAD"], capture_output=True, text=True, timeout=60)
+        # repo names may really end in "." (github.com/x/-kawla-agent.) or the dot may be the sentence's: try both
+        for cand in dict.fromkeys([repo, repo.rstrip(".")] if repo.endswith(".") else [repo]):
+            r = subprocess.run(["git", "ls-remote", cand + (".git" if cand.endswith(".") else ""), "HEAD"],
+                               capture_output=True, text=True, timeout=60)
+            if not r.returncode and r.stdout.strip():
+                repo = cand + (".git" if cand.endswith(".") else "")
+                break
         if r.returncode or not r.stdout.strip():
             return d, "PRIVATE", "repo not reachable (private or wrong link)", None
         fp = r.stdout.split()[0][:7]
         if st.get("fingerprint") == fp and os.path.isdir(st.get("path", "")):
             return d, "same", fp, None
-        r = subprocess.run(["git", "clone", "-q", repo, inc], capture_output=True, text=True, timeout=600)
+        r = subprocess.run(["git", "-c", "core.longpaths=true", "clone", "-q", repo, inc], capture_output=True, text=True, timeout=600)
         if r.returncode:
             return d, "ERROR", r.stderr.strip()[:120], None
         extract_zips(inc)

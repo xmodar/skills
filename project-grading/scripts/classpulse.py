@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #   "cryptography>=42",
+#   "openpyxl>=3.1",
 # ]
 # ///
 """ClassPulse → attendance marks for the project-grading workbook.
@@ -22,6 +23,9 @@ Method:
   Identities are merged when they share a ClassPulse participant id, a roster ID or a normalised name, plus the
   manual `aliases`; each checkpoint answered by any of their identities counts once.
 - Rejected or never-admitted joins are kept as "tried to join" evidence; `exclude` drops people (e.g. co-trainers).
+- `chat_checkpoint_credit`: a Webex chat message (chat-<date>.xlsx) posted while a checkpoint was open counts as answering
+  it (minute resolution: from the opening minute to the closing minute). Chat names are matched with aliases.json /
+  students.json / extras.json (the same files build_workbook.py uses) or an exact ClassPulse/roster name.
 """
 import argparse
 import base64
@@ -33,6 +37,8 @@ import os
 import re
 import sys
 import zlib
+
+import openpyxl
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -111,7 +117,7 @@ def main():
     nkey = lambda n: alias.get(norm(n), norm(n))
 
     # ---- one entry per (day, ClassPulse participant)
-    ents, totals, logs = [], {}, {}
+    ents, totals, logs, wins = [], {}, {}, {}
     for d in held:
         sids = set(by_day[d])
         ev = sorted((e for e in data["events"] if e.get("sessionId") in sids), key=lambda e: e["t"])
@@ -125,6 +131,15 @@ def main():
                 R.setdefault(e["r"]["cp"], set()).add(e["r"]["pid"])
         cps = [e for e in ev if e["type"] == "cp.open" and R.get(e["id"])]
         totals[d] = len(cps)
+        # checkpoint windows in local minutes: opening minute .. closing minute (no close: next opening or session end)
+        minute = lambda ms: local(ms).replace(second=0, microsecond=0, tzinfo=None)
+        opens = [e for e in ev if e["type"] == "cp.open"]
+        stop = max((e["t"] for e in ev), default=0)
+        wins[d] = []
+        for o in cps:
+            close = next((e["t"] for e in ev if e["type"] == "cp.close" and e.get("cp") == o["id"] and e["t"] >= o["t"]), None)
+            nxt = next((e["t"] for e in opens if e["t"] > o["t"]), stop)
+            wins[d].append((o["id"], minute(o["t"]), minute(close if close is not None else nxt)))
         num = {o["id"]: (i, o) for i, o in enumerate(cps, 1)}
         hm = lambda ms: local(ms).strftime("%H:%M")
         logs[d] = []
@@ -145,6 +160,55 @@ def main():
                          "name": re.sub(r"\s+", " ", p["name"]).strip(), "known": bool(p.get("known")),
                          "status": st.get(p["id"], p.get("status")),
                          "cps": {o["id"] for o in cps if p["id"] in R[o["id"]]}})
+
+    # ---- chat credit: a chat message during an open checkpoint counts as answering it (pseudo-entries, merged below)
+    chat_log = {"credited": {}, "unmatched": {}}
+    if cp.get("chat_checkpoint_credit"):
+        roster = load("students.json", [])
+        aliases, extras = load("aliases.json", {}), load("extras.json", {})
+        instr = set(cfg.get("instructor_chat_names", ["SDAIA Academy"])) | {"Trainer"}
+        r_email = {(s.get("email") or "").strip().lower(): s for s in roster if s.get("email")}
+        r_name = {norm(s["name"]): s for s in roster if s.get("name")}
+        cp_names = {nkey(e["name"]) for e in ents}
+
+        def target(u):
+            """(roster ID, name) for a chat name, or None."""
+            ref = str(aliases.get(u, ""))
+            s = None
+            if ref.startswith("#"):
+                s = roster[int(ref[1:])] if ref[1:].isdigit() and int(ref[1:]) < len(roster) else None
+            elif ref.startswith("+"):
+                x = extras.get(ref[1:])
+                return (None, x["name"]) if x else None
+            elif ref:
+                s = r_email.get(ref.strip().lower()) or r_name.get(norm(ref))
+            else:
+                s = r_name.get(norm(u))
+                if not s and nkey(u) in cp_names:
+                    return (None, u)
+            return (str(s.get("nafath") or "").strip() or None, s["name"]) if s else None
+
+        for d in held:
+            f = os.path.join(D, f"chat-{d}.xlsx")
+            if not os.path.exists(f):
+                continue
+            got = {}
+            for row in openpyxl.load_workbook(f, read_only=True).worksheets[0].iter_rows(min_row=2, values_only=True):
+                if not row or not row[0] or not row[1] or row[1] in instr or norm(row[1]) in exclude:
+                    continue
+                t = dt.datetime.strptime(str(row[0])[:16], "%Y-%m-%d %H:%M")
+                hit = {cid for cid, a, b in wins[d] if a <= t <= b}
+                if not hit:
+                    continue
+                tg = target(row[1])
+                if not tg:
+                    chat_log["unmatched"].setdefault(row[1], set()).add(d)
+                    continue
+                got.setdefault(tg, set()).update(hit)
+            for (rid, name), hit in got.items():
+                ents.append({"day": d, "pid": "chat:" + (rid or norm(name)), "rid": rid or "", "name": name, "known": True,
+                             "status": "admitted", "cps": hit, "chat": True})
+            chat_log["credited"][d] = len(got)
 
     # ---- merge identities (union-find over participant id, roster ID, normalised name)
     par = list(range(len(ents)))
@@ -173,8 +237,10 @@ def main():
         for d in held:
             es = [e for e in g if e["day"] == d]
             if es:
-                answered = len(set().union(*(e["cps"] for e in es)))
-                p["days"][d] = {"answered": answered, "total": totals[d], "admitted": any(e["status"] == "admitted" for e in es)}
+                cps_all = set().union(*(e["cps"] for e in es))
+                via_chat = len(cps_all - set().union(set(), *(e["cps"] for e in es if not e.get("chat"))))
+                p["days"][d] = {"answered": len(cps_all), "total": totals[d], "admitted": any(e["status"] == "admitted" for e in es),
+                                "via_chat": via_chat}
         new_batch = bool(nb_day) and not any(d in p["days"] for d in held if d < nb_day) and nb_day in p["days"]
         for d in held:
             present_min, late_min = rule(d, "present_min", 0.65), rule(d, "late_min", 0.25)
@@ -193,6 +259,8 @@ def main():
                 m, why = nb["mark_before"], "new batch (not enrolled yet)"
             else:
                 m, why = "Absent", "did not join" if not x else f"{x['answered']}/{x['total']} answered"
+            if x and x.get("via_chat"):
+                why += f" ({x['via_chat']} via chat)"
             p["marks"][d], p["why"][d] = m, why
         if cp.get("leave_if_never_present") and held and all(p["marks"][d] != "Present" for d in held):
             for d in held:
@@ -207,7 +275,11 @@ def main():
                 p["marks"][d] = "Leave"
         people.append(p)
 
-    out = {"source": os.path.basename(backup), "days": held, "totals": totals, "people": people, "logs": logs}
+    for p in people:                                   # pseudo chat identities are not display names
+        p["names"] = [n for n in p["names"] if n] or p["names"]
+    out = {"source": os.path.basename(backup), "days": held, "totals": totals, "people": people, "logs": logs,
+           "chat_credit": {"people_per_day": chat_log["credited"],
+                           "unmatched": {u: sorted(ds) for u, ds in chat_log["unmatched"].items()}}}
     with open(os.path.join(D, "classpulse_marks.json"), "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
     cnt = {d: {} for d in held}
@@ -217,6 +289,10 @@ def main():
     merged = sum(1 for p in people if len(p["names"]) > 1 or len(p["rosterIds"]) > 1)
     print(f"classpulse_marks.json: {len(people)} people ({merged} merged) | checkpoints {totals} | " +
           " | ".join(f"{d} " + " ".join(f"{k} {v}" for k, v in sorted(c.items())) for d, c in cnt.items()))
+    if cp.get("chat_checkpoint_credit"):
+        gained = {d: sum(1 for p in people if p["days"].get(d, {}).get("via_chat")) for d in held}
+        print("chat credit: people with checkpoints gained via chat per day", gained,
+              "| unmatched chat names during checkpoints:", {u: sorted(ds) for u, ds in chat_log["unmatched"].items()} or "none")
     missing = [d for d in days if d not in by_day and d <= max(held, default="")]
     if missing:
         print("no ClassPulse session on:", ", ".join(missing))

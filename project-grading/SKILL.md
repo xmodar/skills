@@ -17,10 +17,15 @@ For Modar's courses. Inputs: an AthkaX program link (`https://athkax.sdaia.gov.s
 | `scripts/submissions.py` | uv script: fetches every link in `submissions.json` (GitHub, Drive folder/file, Google Docs/Sheets/Slides) into versioned folders `<dir>.vN`, detects changes, extracts zips. |
 | `scripts/merge_grades.py` | Merges grader JSON (`grades/<dir>.vN.json`, optional `.bonus.json`) into `grades.json`; ungraded/private entries, keep-higher, bonus overrides; recovers results from a workflow `journal.jsonl`. |
 | `scripts/report.py` | `chat`: new messages + links since last run, and learners still waiting for a reply. `status`: every learner's project, attendance, total, certificate and the project score still needed. Writes UTF-8 files. |
+| `scripts/chat_day.py` | **Run after every new Webex export, before `--check`/build.** Archives the raw export (`backup/chat-<date>.raw-HHMMSS.xlsx`), converts the new 12-column / time-only format, and rebuilds `chat-<date>.xlsx` as the union of all raw exports of the day (re-exports drop the oldest messages; newest export wins per timestamp+text, so senders he renamed keep the corrected name). `--since HH:MM --out f` lists the new messages. |
+| `scripts/recover_grades.py` | Writes missing `<dir>.vN.json` / `.bonus.json` from a workflow `journal.jsonl`, matching results by `submission` or repo URL (graders often skip writing files or the `submission` field, which `merge_grades.py --journal` then misses). |
+| `scripts/score_table.py` | `table`: the per-round report table, ordered by posting time (see 6). `whatif --present-min 0.40`: recomputes ClassPulse days with other thresholds and lists mark and certificate changes, without touching the workbook. |
+| `scripts/classpulse_fix.py` | uv script **he runs in his terminal** (password prompt): `inspect <dir> <out> <keys…>` dumps roster entries, joins, device requests/approvals and the device of every answer for names/IDs/devices; `move-device <dir> <device> <fromRosterId> <toRosterId>` moves a wrongly approved device and its events to the right learner, re-encrypts, keeps the original in `backup/`, reruns classpulse.py. |
 | `templates/course.template.json` | Course settings (rubric, roll-call rules, overrides, grading policy). |
-| `templates/RUBRIC.template.md` | Rubric skeleton for code/ML capstones. |
+| `templates/RUBRIC.template.md` | Rubric skeleton for code/ML capstones (output JSON includes `missing` keywords for the table). |
 | `templates/RUBRIC.productivity.md` | Worked rubric for non-code capstones (files on GitHub/Drive, presentation-file rule, calibration caps). |
-| `templates/grade.workflow.js` | Workflow script: one Sonnet grader per submission version + optional lenient bonus review. |
+| `templates/RUBRIC.agentic.md` | Worked rubric for a code capstone with **no live demo**: individual public GitHub repo, AI-assisted code allowed, demo judged from code + saved run evidence, presentation/analysis judged from README.md, README must cite the course name + link (else presentation ≤ half). |
+| `templates/grade.workflow.js` | Workflow script: one Sonnet grader per submission version, then the lenient bonus review of **every** graded version (default; `bonus: false` skips). Copy it to the scratchpad and pass that path as `scriptPath` (the skill folder is not readable by the Workflow tool). |
 
 ## Environment
 - **Windows desktop (usual)**: run Python only as `uv run -q [--with pkgs] python -I ...` (no bare `python`); set `PYTHONIOENCODING=utf-8`. The console garbles Arabic: send Arabic output to files and read them with the Read tool. `tar.exe` (System32) opens .rar; prefer Python `zipfile` for zips. No LibreOffice: verify totals in Python, not by recalculating the xlsx.
@@ -59,17 +64,24 @@ For Modar's courses. Inputs: an AthkaX program link (`https://athkax.sdaia.gov.s
 - Present: posted from 1 minute before to 3 minutes after an instructor message containing **تحضير**. Late: posted that day outside every window. Absent: no message.
 - Only roll calls present in the export count; never invent windows (`extra_windows` only if he confirms a missing call).
 - **Lenient day** (`lenient_days`, only on his request — e.g. the presentation day): any message or a posted project link = Present, no Late.
-- Exports are re-made during the day and can **drop the oldest messages**; keep each export (or `report.py chat` snapshots) and warn if a person's only message disappeared.
+- Exports are re-made during the day and **drop the oldest messages** (Oct 2026: a learner's only early message vanished and she turned Absent). Always run `chat_day.py <dir> <date>` on each new export so the day's sheet is the union of every export; never build from a single re-export.
+- Two learners with the same display name (e.g. "Khaled"): ask him to have them rename; he may correct the export by hand. Map the shared name to whoever keeps it on every day, give the other his own alias, and check that the mapping does not change ClassPulse chat credit on earlier days (it usually doesn't when the messages fall outside open checkpoints).
+- Instructor messages that contain تحضير (e.g. "مشكلتك في التحضير") are detected as roll calls; harmless on a lenient day, but on a normal chat day confirm with him which ones were real calls.
 
 **ClassPulse days** (`course.json` → `classpulse`; defaults in brackets)
 - Day total = checkpoints with at least one answer; a person's score = unique checkpoints answered across merged identities.
+- `chat_checkpoint_credit` (on request): a Webex chat message posted while a checkpoint was open (opening minute to closing minute) counts as answering it. Needs `chat-<date>.xlsx` for each day and the chat names mapped in `aliases.json` first (run `build_workbook.py --check`, map, then rerun `classpulse.py`). A chat-only participant counts as joined that day.
 - Present ≥ `present_min` [0.65]; Late ≥ `late_min` [0.25], or with `joined_counts_as_late` anyone who opened the link; Absent: did not join.
 - `no_late_days`, `new_batch` {`admitted_day`, `mark_before`, `mark_admitted_day`}, `leave_if_never_present` (never Present anywhere → Leave on every day, chat days included), `leave_if_joined_days_lte` (N: anyone who joined ClassPulse on at most N days gets Leave on every day; 0 = only learners never seen, days not joined stay Absent. For the rule "joined one day only → Leave everywhere, judged at the end" keep 0 during the course and set 1 on the last day; sync with `--no-skip-all-absent`).
 - Identities merge on participant id, roster ID or normalised name; `classpulse.aliases` for cross-script duplicates; `exclude` co-trainers. Matching to AthkaX: `aliases.json` → Nafath ID → email → exact name.
 - **Hybrid**: a day with no ClassPulse session falls back to that day's chat export automatically. On ClassPulse days the chat export only feeds the date sheet (never the marks); its unmapped names are listed by the build and shown as typed, so map them too (chat names are usually Latin transliterations of the Arabic roster names — resolve by hand, only unambiguous ones).
 - Lenient settings used once (Productivity, Oct 2026): `present_min` 0.25, `joined_counts_as_late`, new batch Late before / Present on day 2, `leave_if_never_present`, day 5 = lenient chat day.
 
-**Instructor overrides**: `status_overrides` `{"<email>": {"<day number>": "Late"}}` (e.g. an excused absence: the link reached her late). Listed in Notes. Then sync that date too.
+**Instructor overrides**: `status_overrides` `{"<email>": {"<day number>": "Late"}}` (e.g. an excused absence: the link reached her late; "ClassPulse would not admit me until you fixed it" → Present that day). Listed in Notes. Then sync that date too.
+
+**Attendance claims on the deadline day** ("I attended but it shows Absent / someone else's name"): check `classpulse_marks.json` (`why` per day), then run `classpulse_fix.py inspect` for the claimant and the named person. A device approved under the wrong learner shows as a `p.deviceRequest` + approved `p.device` on the other learner's identity, joining in step with the claimant's own device. Fix with `move-device`, diff `classpulse_marks.json` against the copy in `backup/`, rebuild, and remind him to re-import the fixed backup. Always state the claim's effect on the certificate (e.g. "even at 100% attendance her project is 3 points short").
+
+**What-if thresholds**: when he asks "what if Present were 40%?", run `score_table.py whatif --present-min 0.40` and report only the certificate changes (and anyone whose pending project could flip). Apply nothing until he decides; if he does, set `classpulse.present_min`, rerun classpulse.py (password), rebuild and re-sync **all** ClassPulse dates.
 
 People not on the AthkaX batch (`extras.json`, `+X1`): keep them on the sheets, no certificate, flag for a registration check.
 
@@ -96,20 +108,41 @@ People not on the AthkaX batch (`extras.json`, `+X1`): keep them on the sheets, 
 2. **Fetch**: `uv run submissions.py check <dir> <subs_root>` → NEW / CHANGED / same / PRIVATE / EMPTY / ERROR per submission.
    - PRIVATE (401): tell him to ask the student to share as "Anyone with the link"; re-check each round. Drive throttling gives the same message — re-run once before reporting.
    - EMPTY: public folder with no files yet. Not GitHub/Drive: grade what's reachable, flag `invalid-submission-form`.
-3. **Grade** every NEW/CHANGED version with the Workflow tool using `templates/grade.workflow.js` (inline script or `scriptPath`), args `{rubric, subs_root, grades_dir, lenient, items: [{v: "<dir>.vN", url, note}]}` — one **Sonnet** agent per submission. Notes carry context: what changed, previous score and its gaps, "regrade as a new submission", posting time.
-4. `merge_grades.py <dir> <grades_dir> --journal <run>/journal.jsonl` (agents often skip writing files), then build, then `report.py status`.
+3. **Grade** every NEW/CHANGED version with the Workflow tool using `templates/grade.workflow.js` (copied to the scratchpad, `scriptPath`), args `{rubric, subs_root, grades_dir, lenient, items: [{v: "<dir>.vN", url, note}]}` — one **Sonnet** agent per submission, then the bonus review of the same versions. Notes carry context: what changed, previous score and its gaps, "regrade as a new submission", a sub-folder to grade (`/tree/main/<path>` links into a copy of the course repo), team/posted-by-someone-else, a zip inside the repo.
+4. `recover_grades.py <grades_dir> <run>/journal.jsonl <v1,v2,…>` (writes grade and bonus files the agents did not), then `merge_grades.py <dir> <grades_dir>`, then build.
+
+**Grading policy (default, Modar):**
+- **Lenient bonus up to +10 for every project**: each graded version gets the bonus review (`bonus_max` 10). Final = min(100, criteria + max(grader bonus, review bonus)); the bonus never exceeds 10.
+- **Several repos from one student** (e.g. "first submission … and if time permits, a second"): grade all, keep the best score; drop the other from `submissions.json` and note both scores in Notes.
+- A repo that later turns **private or deleted** keeps the grade it got while public; tell him so he can ask the student to reopen it.
+- A team repo posted by one member is credited to the poster and flagged `team`; a teammate who later posts her own repo is graded on that.
+- A link that is not a repository (Codespaces `app.github.dev` preview, slide link): not graded until a repo is posted; note it.
+- `submissions.py` handles repo names that really end in "." and Windows long paths (`core.longpaths`); if a clone still fails with a path error, clone by hand with `git -c core.longpaths=true clone` into `<subs_root>/<dir>.vN` and set that version in `submissions_state.json`.
 5. **Verify serious claims yourself** before reporting (e.g. a "real metrics" script that only calls `time.sleep`, timings an LLM "computed" for itself, a PDF about someone else's project).
 6. Flag without deducting extra: AI-generated disclosures, lab-copy of course packs, one-big-commit uploads, synthetic data.
 
 ### 5. Re-check rounds (the deadline day)
-Each "check the chat / updates" round: copy the new export → `report.py chat` → update `submissions.json` → `submissions.py check` (all links, not only the ones mentioned in chat — students update silently) → grade NEW/CHANGED → merge → build → `report.py status` → report.
+Each "check the chat / updates" round ("updated the chat", "check updates"), usually every 10–20 minutes until the deadline:
+1. `chat_day.py <dir> <date> --since <last HH:MM>` → read the new messages (exports can land mid-round: if a build fails on "time data 'HH:MM'", a new raw export arrived — rerun `chat_day.py`).
+2. Map new chat names (`--check`), add new links to `submissions.json` (with `posted`, `day`, `chat_name`), note attendance claims and questions.
+3. `submissions.py check` over **all** links (students update silently) → grade NEW/CHANGED (bonus review included) → `recover_grades.py` → `merge_grades.py` → build → copy into the course folder.
+4. `score_table.py table` → report (see 6). Keep the order: attendance first, then grading.
 - **Deadline policy** is his: updates before the deadline (and any grace period he grants) are graded as new submissions; he may later accept everything.
-- **Lenient mode** (on request): `grading.keep_higher_on_resubmit` so a resubmission never lowers a score, `lenient: true` for graders, and a **bonus review** pass (`bonus: {max, dirs}` in the workflow args; `bonus_max` in course.json) over all graded projects.
+- **Extra leniency** (on request, on top of the default +10 bonus review): `grading.keep_higher_on_resubmit` so a resubmission never lowers a score, and `lenient: true` for graders.
 - **Instructor adjustments** to pass specific students: `grading.bonus_overrides` (within the bonus cap) and/or `status_overrides`; both are noted in the workbook.
 
 ### 6. Build and deliver
 - `build_workbook.py <dir> --out <scratch>/new.xlsx`, then copy into the course folder. `Device or resource busy`/`Permission denied` = open in Excel; ask him to close it. Never hand-edit the xlsx; if he edits it, carry his changes into `build_workbook.py`.
-- Report per round: a table of changed students (project, attendance, total, certificate), what cost points in one line each, PRIVATE/EMPTY links, learners waiting for a reply (`chat_unreplied.txt`), counts per certificate, and a reminder to sync today's attendance.
+- **Report table** (`score_table.py table`), ordered by the time the link was posted in the chat:
+
+  | # | chat name | project score | remaining | notes |
+  |---|---|---|---|---|
+  | 1 | سها … | 87 | 0 | |
+  | 21 | Ziyad … | 46 | 5 | evals.py, tasks.jsonl (≥15), A/B CSVs, error analysis counts, real MCP server |
+  | 24 | غاليه … | 66 | — | attendance 50% |
+
+  `remaining` = 0 when the certificate is اجتياز; otherwise the project points still needed to pass; "—" when attendance ≤ 65% (no project can pass). `notes` = short keyword list of what would get them to pass (the grader's `missing`), empty when passing. The first round shows the full table; later rounds show **only new or changed rows** plus "everyone else unchanged" and the pass count (e.g. "30 of 37 reach اجتياز").
+- Under the table, 3–5 bullets: attendance claims and their effect, links that aren't repos / private / team, unanswered questions from the chat, and anything that needs his decision. Remind him which dates changed and need syncing.
 - "Who can still pass?": everyone with حضور — needed project > (65% − 0.3 × attendance) / 0.7 (100% attendance → 50%, 90% → 54.3%, 80% → 58.6%, 70% → 62.9%). At ≤ 50% attendance nobody can pass. A student absent today who posts anything on a lenient day gains attendance.
 
 ### 7. Sync attendance to AthkaX (only when he asks)
