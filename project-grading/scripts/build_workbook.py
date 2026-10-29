@@ -41,6 +41,9 @@ FILL = {"Present": PatternFill("solid", fgColor="C6E0B4"),
         "Late": PatternFill("solid", fgColor="FFE699"),
         "Absent": PatternFill("solid", fgColor="F8CBAD"),
         "Leave": PatternFill("solid", fgColor="D9D9D9")}
+# conditional-format fills: Excel paints a dxf solid fill from bgColor (end_color), so set both colours
+CF = lambda col: PatternFill(fill_type="solid", start_color=col, end_color=col)
+CF_FILL = {k: CF(f.fgColor.rgb[-6:]) for k, f in FILL.items()}
 RANK = ["Absent", "Leave", "Late", "Present"]
 THIN = Side(style="thin", color="D9D9D9")
 BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -403,7 +406,7 @@ def main():
     listed = r - HR - 1
     last_c = max(r - 1, HR + 1)
     for v, col in (("اجتياز", "C6E0B4"), ("حضور", "FFE699"), ("بدون", "F8CBAD")):
-        c.conditional_formatting.add(f"F{HR + 1}:F{last_c}", FormulaRule(formula=[f'F{HR + 1}="{v}"'], fill=PatternFill("solid", fgColor=col)))
+        c.conditional_formatting.add(f"F{HR + 1}:F{last_c}", FormulaRule(formula=[f'F{HR + 1}="{v}"'], fill=CF(col)))
     note = c.cell(r + 1, 1, cfg.get("certificates_footnote", "تتضمن القائمة كل من سُجّل حضوره في يوم واحد على الأقل."))
     note.font = Font(name=FONT, size=10, italic=True, color="595959")
     for col, w in zip("ABCDEFG", [30, 32, 9, 9, 9, 12, 60]):
@@ -417,7 +420,8 @@ def main():
     lastday = L(3 + ndays)
     # ClassPulse days: a learner who joined gets the checkpoint ratio as a formula ("=4/6") whose number format shows
     # the mark — Present ≥ present_min, Late ≥ late_min, else Absent — when that matches the computed mark (not an
-    # override, Leave or a special rule); everything else is text. Totals and fills read both forms.
+    # override, Leave or a special rule); everything else is text. Totals and the conditional fills read both forms;
+    # mark cells carry no static fill, so the colour always follows the cell's current value.
     pmin, lmin = cpc.get("present_min", 0.65), cpc.get("late_min", 0.25)
     ratio_fmt = f'[>={pmin:g}]"Present";[>={lmin:g}]"Late";"Absent"'
     as_mark = lambda a, t: "Present" if a / t >= pmin else "Late" if a / t >= lmin else "Absent"
@@ -434,7 +438,7 @@ def main():
                 body(at, r, 4 + d, f"={q[0]}/{q[1]}", align=CENTER, fmt=ratio_fmt, zebra=False)
                 n_formula += 1
             else:
-                body(at, r, 4 + d, v, align=CENTER, fill=FILL.get(v), zebra=v is None)
+                body(at, r, 4 + d, v, align=CENTER, zebra=v is None)
         rng = f"D{r}:{lastday}{r}"
         body(at, r, att_col, f'=(2*(COUNTIF({rng},"Present")+COUNTIF({rng},">={pmin:g}"))+COUNTIF({rng},"Late")'
                              f'+COUNTIFS({rng},">={lmin:g}",{rng},"<{pmin:g}"))/{2 * ndays}',
@@ -444,8 +448,8 @@ def main():
              "Late": f'OR(D2="Late",AND(ISNUMBER(D2),D2>={lmin:g},D2<{pmin:g}))',
              "Absent": f'OR(D2="Absent",AND(ISNUMBER(D2),D2<{lmin:g}))',
              "Leave": 'D2="Leave"'}
-    for v, f in FILL.items():
-        at.conditional_formatting.add(f"D2:{lastday}{last}", FormulaRule(formula=[rules[v]], fill=f))
+    for v, f in CF_FILL.items():
+        at.conditional_formatting.add(f"D2:{lastday}{last}", FormulaRule(formula=[rules[v]], fill=f, stopIfTrue=True))
     for col, w in zip("ABC", [32, 32, 40]):
         at.column_dimensions[col].width = w
     for d in range(ndays):
@@ -488,7 +492,7 @@ def main():
         start_type="num", start_value=0, start_color="F8696B", mid_type="num", mid_value=rub.get("pass_mark", 70) / 100,
         mid_color="FFEB84", end_type="num", end_value=cap / 100, end_color="63BE7B"))
     p.conditional_formatting.add(f"{L(6 + nc + nb)}2:{L(6 + nc + nb)}{lastp}",
-                                 FormulaRule(formula=[f'{L(6 + nc + nb)}2="No"'], fill=FILL["Absent"]))
+                                 FormulaRule(formula=[f'{L(6 + nc + nb)}2="No"'], fill=CF_FILL["Absent"]))
     widths = [32, 30, 45, 44, 18] + [13] * nc + ([12] if bonus else []) + [12, 10, 100]
     for j, w in enumerate(widths, 1):
         p.column_dimensions[L(j)].width = w
